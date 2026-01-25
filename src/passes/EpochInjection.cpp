@@ -39,6 +39,8 @@ namespace wasm {
 Name EPOCH_CALLBACK("epoch_callback");
 Name EPOCH("epoch");
 
+Name LIND_NAMESPACE("lind");
+
 struct EpochInjection : public WalkerPass<PostWalker<EpochInjection>> {
   // The module name the epoch function is imported from.
   IString epochModule;
@@ -77,34 +79,7 @@ struct EpochInjection : public WalkerPass<PostWalker<EpochInjection>> {
                                             builder.makeConst(int64_t(0)),
                                             Builder::Mutable);
 
-    if (epochModule != "") {
-      import->module = epochModule;
-    } else {
-      // Import the epoch function from import "env" if the module
-      // imports other functions from that name.
-      for (auto& func : curr->functions) {
-        if (func->imported() && func->module == ENV) {
-          import->module = func->module;
-          break;
-        }
-      }
-
-      // If not, then pick the import name of the first function we find.
-      if (!import->module) {
-        for (auto& func : curr->functions) {
-          if (func->imported()) {
-            import->module = func->module;
-            break;
-          }
-        }
-      }
-
-      // If no function was found, use ENV.
-      if (!import->module) {
-        import->module = ENV;
-      }
-    }
-
+    import->module = LIND_NAMESPACE;
     import->base = EPOCH_CALLBACK;
     curr->addFunction(std::move(import));
     curr->addGlobal(std::move(epoch));
