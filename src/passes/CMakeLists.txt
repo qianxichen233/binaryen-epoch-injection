@@ -63,6 +63,7 @@ set(passes_SOURCES
   LocalCSE.cpp
   LocalSubtyping.cpp
   LogExecution.cpp
+  EpochInjection.cpp
   LoopInvariantCodeMotion.cpp
   Memory64Lowering.cpp
   MemoryPacking.cpp
