@@ -19,12 +19,6 @@
 // This is helpful for fuzzing.
 //
 
-/*
-high chance for set at start of loop
-  high chance of get of a set local in the scope of that scope
-    high chance of a tee in that case => loop var
-*/
-
 #include "ir/branch-utils.h"
 #include "ir/struct-utils.h"
 #include "support/insert_ordered.h"
@@ -34,6 +28,7 @@ high chance for set at start of loop
 #include <ir/literal-utils.h>
 #include <ir/manipulation.h>
 #include <ir/names.h>
+#include <ir/public-type-validator.h>
 #include <ir/utils.h>
 #include <support/file.h>
 #include <tools/optimization-options.h>
@@ -61,9 +56,68 @@ struct BinaryArgs {
   Expression* c;
 };
 
+// params
+
+struct FuzzParams {
+  // The maximum amount of params to each function.
+  int MAX_PARAMS;
+
+  // The maximum amount of vars in each function.
+  int MAX_VARS;
+
+  // The maximum number of globals in a module.
+  int MAX_GLOBALS;
+
+  // The maximum number of tuple elements.
+  int MAX_TUPLE_SIZE;
+
+  // The maximum number of struct fields.
+  int MAX_STRUCT_SIZE;
+
+  // The maximum number of elements in an array.
+  int MAX_ARRAY_SIZE;
+
+  // The number of nontrivial heap types to generate.
+  int MIN_HEAPTYPES;
+  int MAX_HEAPTYPES;
+
+  // some things require luck, try them a few times
+  int TRIES;
+
+  // beyond a nesting limit, greatly decrease the chance to continue to nest
+  int NESTING_LIMIT;
+
+  // the maximum size of a block
+  int BLOCK_FACTOR;
+
+  // the memory that we use, a small portion so that we have a good chance of
+  // looking at writes (we also look outside of this region with small
+  // probability) this should be a power of 2
+  Address USABLE_MEMORY;
+
+  // the number of runtime iterations (function calls, loop backbranches) we
+  // allow before we stop execution with a trap, to prevent hangs. 0 means
+  // no hang protection.
+  int HANG_LIMIT;
+
+  // the maximum amount of new GC types (structs, etc.) to create
+  int MAX_NEW_GC_TYPES;
+
+  // the maximum amount of catches in each try (not including a catch-all, if
+  // present).
+  int MAX_TRY_CATCHES;
+
+  FuzzParams() { setDefaults(); }
+
+  void setDefaults();
+};
+
 // main reader
 
 class TranslateToFuzzReader {
+  static constexpr size_t VeryImportant = 4;
+  static constexpr size_t Important = 2;
+
 public:
   TranslateToFuzzReader(Module& wasm,
                         std::vector<char>&& input,
@@ -75,6 +129,10 @@ public:
   void pickPasses(OptimizationOptions& options);
   void setAllowMemory(bool allowMemory_) { allowMemory = allowMemory_; }
   void setAllowOOB(bool allowOOB_) { allowOOB = allowOOB_; }
+  void setPreserveImportsAndExports(bool preserveImportsAndExports_) {
+    preserveImportsAndExports = preserveImportsAndExports_;
+  }
+  void setImportedModule(std::string importedModuleName);
 
   void build();
 
@@ -85,6 +143,7 @@ private:
   bool closedWorld;
   Builder builder;
   Random random;
+  Intrinsics intrinsics;
 
   // Whether to emit memory operations like loads and stores.
   bool allowMemory = true;
@@ -92,6 +151,16 @@ private:
   // Whether to emit loads, stores, and call_indirects that may be out
   // of bounds (which traps in wasm, and is undefined behavior in C).
   bool allowOOB = true;
+
+  // Whether we preserve imports and exports. Normally we add imports (for
+  // logging and other useful functionality for testing), and add exports of
+  // functions as we create them. With this set, we add neither imports nor
+  // exports, which is useful if the tool using us only wants us to mutate an
+  // existing testcase (using initial-content).
+  bool preserveImportsAndExports = false;
+
+  // An optional module to import from.
+  std::optional<Module> importedModule;
 
   // Whether we allow the fuzzer to add unreachable code when generating changes
   // to existing code. This is randomized during startup, but could be an option
@@ -108,8 +177,10 @@ private:
   Name HANG_LIMIT_GLOBAL;
 
   Name funcrefTableName;
+  Name exnrefTableName;
 
   std::unordered_map<Type, Name> logImportNames;
+  Name hashMemoryName;
   Name throwImportName;
   Name tableGetImportName;
   Name tableSetImportName;
@@ -124,7 +195,7 @@ private:
   std::unordered_map<Type, std::vector<Name>> immutableGlobalsByType;
   std::unordered_map<Type, std::vector<Name>> importedImmutableGlobalsByType;
 
-  std::vector<Type> loggableTypes;
+  const std::vector<Type> loggableTypes;
 
   // The heap types we can pick from to generate instructions.
   std::vector<HeapType> interestingHeapTypes;
@@ -145,7 +216,19 @@ private:
   // All arrays that are mutable.
   std::vector<HeapType> mutableArrays;
 
+  // All tags that are valid as exception tags (which cannot have results).
+  std::vector<Tag*> exceptionTags;
+
+  // All functions marked jsCalled.
+  std::vector<Name> jsCalled;
+
   Index numAddedFunctions = 0;
+
+  // The name of an empty tag.
+  Name trivialTag;
+
+  // Whether we were given initial functions.
+  bool haveInitialFunctions;
 
   // RAII helper for managing the state used to create a single function.
   struct FunctionCreationContext {
@@ -161,10 +244,7 @@ private:
     // type => list of locals with that type
     std::unordered_map<Type, std::vector<Index>> typeLocals;
 
-    FunctionCreationContext(TranslateToFuzzReader& parent, Function* func)
-      : parent(parent), func(func) {
-      parent.funcContext = this;
-    }
+    FunctionCreationContext(TranslateToFuzzReader& parent, Function* func);
 
     ~FunctionCreationContext();
 
@@ -178,6 +258,29 @@ private:
   };
 
   FunctionCreationContext* funcContext = nullptr;
+
+  // The fuzzing parameters we use. This may change from function to function or
+  // even in a more refined manner, so we use an RAII context to manage it.
+  struct FuzzParamsContext : public FuzzParams {
+    TranslateToFuzzReader& parent;
+
+    FuzzParamsContext* old;
+
+    FuzzParamsContext(TranslateToFuzzReader& parent)
+      : parent(parent), old(parent.fuzzParams) {
+      parent.fuzzParams = this;
+    }
+
+    ~FuzzParamsContext() { parent.fuzzParams = old; }
+  };
+
+  FuzzParamsContext* fuzzParams = nullptr;
+
+  // The default global context we use throughout the process (unless it is
+  // overridden using another context in an RAII manner).
+  std::unique_ptr<FuzzParamsContext> globalParams;
+
+  const std::vector<MemoryOrder> atomicMemoryOrders;
 
 public:
   int nesting = 0;
@@ -255,9 +358,25 @@ private:
   Expression* makeImportSleep(Type type);
   Expression* makeMemoryHashLogging();
 
-  // Function creation
+  // We must be careful not to add exports that have invalid public types, such
+  // as those that reach exact types when custom descriptors is disabled.
+  PublicTypeValidator publicTypeValidator;
+  bool isValidPublicType(Type type) {
+    return publicTypeValidator.isValidPublicType(type);
+  }
+
+  // Function operations. The main processFunctions() loop will call addFunction
+  // as well as modFunction().
+  void processFunctions();
+  // Add a new function.
   Function* addFunction();
+  // Modify an existing function.
+  void modFunction(Function* func);
+
   void addHangLimitChecks(Function* func);
+
+  void useImportedFunctions();
+  void useImportedGlobals();
 
   // Recombination and mutation
 
@@ -269,14 +388,23 @@ private:
   // instruction for EH is supposed to exist only at the beginning of a 'catch'
   // block, so it shouldn't be moved around or deleted freely.
   bool canBeArbitrarilyReplaced(Expression* curr) {
+    // TODO: Remove this once we better support exact references.
+    if (curr->type.isExact()) {
+      return false;
+    }
     return curr->type.isDefaultable() &&
            !EHUtils::containsValidDanglingPop(curr);
   }
   void recombine(Function* func);
   void mutate(Function* func);
-  // Fix up the IR after recombination and mutation.
+  // Fix up the IR for closed world.
+  void fixClosedWorld(Function* func);
+  // Fix up the IR after recombination and mutation (which may break the IR).
   void fixAfterChanges(Function* func);
   void modifyInitialFunctions();
+
+  // Note a global for use during code generation.
+  void useGlobalLater(Global* global);
 
   // Initial wasm contents may have come from a test that uses the drop pattern:
   //
@@ -367,6 +495,7 @@ private:
   // used in a place that will trap on null. For example, the reference of a
   // struct.get or array.set would use this.
   Expression* makeTrappingRefUse(HeapType type);
+  Expression* makeTrappingRefUse(Type type);
 
   Expression* buildUnary(const UnaryArgs& args);
   Expression* makeUnary(Type type);
@@ -388,11 +517,14 @@ private:
   Expression* makeSIMDShift();
   Expression* makeSIMDLoad();
   Expression* makeBulkMemory(Type type);
+  Expression* makeTableGet(Type type);
+  Expression* makeTableSet(Type type);
   // TODO: support other RefIs variants, and rename this
   Expression* makeRefIsNull(Type type);
   Expression* makeRefEq(Type type);
   Expression* makeRefTest(Type type);
   Expression* makeRefCast(Type type);
+  Expression* makeRefGetDesc(Type type);
   Expression* makeBrOn(Type type);
 
   // Decide to emit a signed Struct/ArrayGet sometimes, when the field is
@@ -409,6 +541,7 @@ private:
   Expression* makeArrayBulkMemoryOp(Type type);
   Expression* makeI31Get(Type type);
   Expression* makeThrow(Type type);
+  Expression* makeThrowRef(Type type);
 
   Expression* makeMemoryInit();
   Expression* makeDataDrop();
@@ -418,6 +551,7 @@ private:
   // Getters for Types
   Type getSingleConcreteType();
   Type getReferenceType();
+  Type getCastableReferenceType();
   Type getEqReferenceType();
   Type getMVPType();
   Type getTupleType();
@@ -427,17 +561,24 @@ private:
   Type getLoggableType();
   bool isLoggableType(Type type);
   Nullability getNullability();
+  Exactness getExactness();
   Nullability getSubType(Nullability nullability);
+  Exactness getSubType(Exactness exactness);
   HeapType getSubType(HeapType type);
   Type getSubType(Type type);
   Nullability getSuperType(Nullability nullability);
   HeapType getSuperType(HeapType type);
   Type getSuperType(Type type);
-  HeapType getArrayTypeForString();
 
   // Utilities
   Name getTargetName(Expression* target);
   Type getTargetType(Expression* target);
+
+  // Checks if a function is valid to take a ref.func of.
+  bool isValidRefFuncTarget(Name func);
+
+  // Checks if a function is a callRef* import (call-ref or call-ref-catch).
+  bool isCallRefImport(Name func);
 
   // statistical distributions
 

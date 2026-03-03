@@ -30,6 +30,7 @@
 #include "parsing.h"
 #include "source-map.h"
 #include "wasm-builder.h"
+#include "wasm-features.h"
 #include "wasm-ir-builder.h"
 #include "wasm-traversal.h"
 #include "wasm-validator.h"
@@ -258,6 +259,52 @@ public:
     std::copy(begin(), end(), ret.begin());
     return ret;
   }
+
+  // Writes bytes in the maximum amount for a U32 LEB placeholder. Return the
+  // offset we wrote it at. The LEB can then be patched with the proper value
+  // later, when the size is known.
+  BinaryLocation writeU32LEBPlaceholder() {
+    BinaryLocation ret = size();
+    *this << int32_t(0);
+    *this << int8_t(0);
+    return ret;
+  }
+
+  // Given the location of a maximum-size LEB placeholder, as returned from
+  // writeU32LEBPlaceholder, use the current buffer size to figure out the size
+  // that should be written there, and emit an optimal-size LEB. Move contents
+  // backwards if we used fewer bytes, and return the number of bytes we moved.
+  // (Thus, if we return >0, we moved code backwards, and the caller may need to
+  // adjust things.)
+  BinaryLocation emitRetroactiveSectionSizeLEB(BinaryLocation start) {
+    // Do not include the LEB itself in the section size.
+    auto sectionSize = size() - start - MaxLEB32Bytes;
+    auto sizeFieldSize = writeAt(start, U32LEB(sectionSize));
+
+    // We can move things back if the actual LEB for the size doesn't use the
+    // maximum 5 bytes. In that case we need to adjust offsets after we move
+    // things backwards.
+    auto adjustmentForLEBShrinking = MaxLEB32Bytes - sizeFieldSize;
+    if (adjustmentForLEBShrinking) {
+      // We can save some room.
+      assert(sizeFieldSize < MaxLEB32Bytes);
+      std::move(&(*this)[start] + MaxLEB32Bytes,
+                &(*this)[start] + MaxLEB32Bytes + sectionSize,
+                &(*this)[start] + sizeFieldSize);
+      resize(size() - adjustmentForLEBShrinking);
+    }
+
+    return adjustmentForLEBShrinking;
+  }
+
+  void writeInlineString(std::string_view name) {
+    auto size = name.size();
+    auto data = name.data();
+    *this << U32LEB(size);
+    for (size_t i = 0; i < size; i++) {
+      *this << int8_t(data[i]);
+    }
+  }
 };
 
 namespace BinaryConsts {
@@ -304,6 +351,16 @@ enum SegmentFlag {
   UsesExpressions = 1 << 2
 };
 
+enum BrOnCastFlag {
+  InputNullable = 1 << 0,
+  OutputNullable = 1 << 1,
+};
+
+constexpr uint32_t ExactImport = 1 << 5;
+
+constexpr uint32_t HasMemoryOrderMask = 1 << 5;
+constexpr uint32_t HasMemoryIndexMask = 1 << 6;
+
 enum EncodedType {
   // value types
   i32 = -0x1,  // 0x7f
@@ -312,8 +369,9 @@ enum EncodedType {
   f64 = -0x4,  // 0x7c
   v128 = -0x5, // 0x7b
   // packed types
-  i8 = -0x8,  // 0x78
-  i16 = -0x9, // 0x77
+  i8 = -0x8,         // 0x78
+  i16 = -0x9,        // 0x77
+  waitQueue = -0x24, // 0x5c
   // reference types
   nullfuncref = -0xd,   // 0x73
   nullexternref = -0xe, // 0x72
@@ -341,9 +399,13 @@ enum EncodedType {
   Array = 0x5e,
   Sub = 0x50,
   SubFinal = 0x4f,
-  SharedDef = 0x65,
-  Shared = -0x1b, // Also 0x65 as an SLEB128
+  Shared = 0x65,
+  SharedLEB = -0x1b, // Also 0x65 as an SLEB128
+  Exact = 0x62,
+  ExactLEB = -0x1e, // Also 0x62 as an SLEB128
   Rec = 0x4e,
+  Descriptor = 0x4d,
+  Describes = 0x4c,
   // block_type
   Empty = -0x40, // 0x40
 };
@@ -393,11 +455,13 @@ extern const char* RelaxedSIMDFeature;
 extern const char* ExtendedConstFeature;
 extern const char* StringsFeature;
 extern const char* MultiMemoryFeature;
-extern const char* TypedContinuationsFeature;
+extern const char* StackSwitchingFeature;
 extern const char* SharedEverythingFeature;
 extern const char* FP16Feature;
 extern const char* BulkMemoryOptFeature;
 extern const char* CallIndirectOverlongFeature;
+extern const char* CustomDescriptorsFeature;
+extern const char* RelaxedAtomicsFeature;
 
 enum Subsection {
   NameModule = 0,
@@ -637,6 +701,9 @@ enum ASTNodes {
   I32AtomicWait = 0x01,
   I64AtomicWait = 0x02,
   AtomicFence = 0x03,
+  Pause = 0x04,
+  StructWait = 0x05,
+  StructNotify = 0x06,
 
   I32AtomicLoad = 0x10,
   I64AtomicLoad = 0x11,
@@ -1062,6 +1129,7 @@ enum ASTNodes {
   TableFill = 0x11,
   TableCopy = 0x0e,
   TableInit = 0x0c,
+  ElemDrop = 0x0d,
   RefNull = 0xd0,
   RefIsNull = 0xd1,
   RefFunc = 0xd2,
@@ -1094,6 +1162,8 @@ enum ASTNodes {
 
   StructNew = 0x00,
   StructNewDefault = 0x01,
+  StructNewDesc = 0x20,
+  StructNewDefaultDesc = 0x21,
   StructGet = 0x02,
   StructGetS = 0x03,
   StructGetU = 0x04,
@@ -1116,14 +1186,19 @@ enum ASTNodes {
   RefTestNull = 0x15,
   RefCast = 0x16,
   RefCastNull = 0x17,
+  RefCastDescEq = 0x23,
+  RefCastDescEqNull = 0x24,
   BrOnCast = 0x18,
   BrOnCastFail = 0x19,
+  BrOnCastDescEq = 0x25,
+  BrOnCastDescEqFail = 0x26,
   AnyConvertExtern = 0x1a,
   ExternConvertAny = 0x1b,
   RefI31 = 0x1c,
   I31GetS = 0x1d,
   I31GetU = 0x1e,
   RefI31Shared = 0x1f,
+  RefGetDesc = 0x22,
 
   // Shared GC Opcodes
 
@@ -1140,6 +1215,17 @@ enum ASTNodes {
   StructAtomicRMWXor = 0x64,
   StructAtomicRMWXchg = 0x65,
   StructAtomicRMWCmpxchg = 0x66,
+  ArrayAtomicGet = 0x67,
+  ArrayAtomicGetS = 0x68,
+  ArrayAtomicGetU = 0x69,
+  ArrayAtomicSet = 0x6a,
+  ArrayAtomicRMWAdd = 0x6b,
+  ArrayAtomicRMWSub = 0x6c,
+  ArrayAtomicRMWAnd = 0x6d,
+  ArrayAtomicRMWOr = 0x6e,
+  ArrayAtomicRMWXor = 0x6f,
+  ArrayAtomicRMWXchg = 0x70,
+  ArrayAtomicRMWCmpxchg = 0x71,
 
   // stringref opcodes
 
@@ -1149,6 +1235,7 @@ enum ASTNodes {
   StringConcat = 0x88,
   StringEq = 0x89,
   StringIsUSV = 0x8a,
+  StringTest = 0x8b,
   StringAsWTF16 = 0x98,
   StringViewWTF16GetCodePoint = 0x9a,
   StringViewWTF16Slice = 0x9c,
@@ -1160,12 +1247,18 @@ enum ASTNodes {
   StringNewLossyUTF8Array = 0xb4,
   StringEncodeLossyUTF8Array = 0xb6,
 
-  // typed continuation opcodes
+  // stack switching opcodes
   ContNew = 0xe0,
   ContBind = 0xe1,
   Suspend = 0xe2,
   Resume = 0xe3,
-
+  ResumeThrow = 0xe4,
+  ResumeThrowRef = 0xe5,
+  Switch = 0xe6,  // NOTE(dhil): the internal class is known as
+                  // StackSwitch to avoid conflict with the existing
+                  // 'switch table'.
+  OnLabel = 0x00, // (on $tag $label)
+  OnSwitch = 0x01 // (on $tag switch)
 };
 
 enum MemoryAccess {
@@ -1336,9 +1429,24 @@ public:
   void writeSourceMapEpilog();
   void writeDebugLocation(const Function::DebugLocation& loc);
   void writeNoDebugLocation();
-  void writeDebugLocation(Expression* curr, Function* func);
-  void writeDebugLocationEnd(Expression* curr, Function* func);
-  void writeExtraDebugLocation(Expression* curr, Function* func, size_t id);
+  void writeSourceMapLocation(Expression* curr, Function* func);
+
+  // Track where expressions go in the binary format.
+  void trackExpressionStart(Expression* curr, Function* func);
+  void trackExpressionEnd(Expression* curr, Function* func);
+  void trackExpressionDelimiter(Expression* curr, Function* func, size_t id);
+
+  // Writes code annotations into a buffer and returns it. We cannot write them
+  // directly into the output since we write function code first (to get the
+  // offsets for the annotations), and only then can write annotations, which we
+  // must then insert before the code (as the spec requires that).
+  std::optional<BufferWithRandomAccess> writeCodeAnnotations();
+
+  std::optional<BufferWithRandomAccess> getBranchHintsBuffer();
+  std::optional<BufferWithRandomAccess> getInlineHintsBuffer();
+  std::optional<BufferWithRandomAccess> getRemovableIfUnusedHintsBuffer();
+  std::optional<BufferWithRandomAccess> getJSCalledHintsBuffer();
+  std::optional<BufferWithRandomAccess> getIdempotentHintsBuffer();
 
   // helpers
   void writeInlineString(std::string_view name);
@@ -1360,7 +1468,7 @@ public:
 
   // Writes an arbitrary heap type, which may be indexed or one of the
   // basic types like funcref.
-  void writeHeapType(HeapType type);
+  void writeHeapType(HeapType type, Exactness exact);
   // Writes an indexed heap type. Note that this is encoded differently than a
   // general heap type because it does not allow negative values for basic heap
   // types.
@@ -1422,6 +1530,15 @@ private:
   std::unordered_map<Name, Index> stringIndexes;
 
   void prepare();
+
+  // Internal helper for emitting a code annotation section for a hint that is
+  // expression offset based. Receives the name of the section and two
+  // functions, one to check if the annotation we care about exists (receiving
+  // the annotation), and another to emit it (receiving the annotation and the
+  // buffer to write in).
+  template<typename HasFunc, typename EmitFunc>
+  std::optional<BufferWithRandomAccess>
+  writeExpressionHints(Name sectionName, HasFunc has, EmitFunc emit);
 };
 
 extern std::vector<char> defaultEmptySourceMap;
@@ -1454,7 +1571,7 @@ public:
   WasmBinaryReader(Module& wasm,
                    FeatureSet features,
                    const std::vector<char>& input,
-                   const std::vector<char>& sourceMap = defaultEmptySourceMap);
+                   std::vector<char>& sourceMap = defaultEmptySourceMap);
 
   void setDebugInfo(bool value) { debugInfo = value; }
   void setDWARF(bool value) { DWARF = value; }
@@ -1491,7 +1608,7 @@ public:
   Type getType();
   // Get a type given the initial S32LEB has already been read, and is provided.
   Type getType(int code);
-  HeapType getHeapType();
+  std::pair<HeapType, Exactness> getHeapType();
   HeapType getIndexedHeapType();
 
   Type getConcreteType();
@@ -1558,6 +1675,11 @@ public:
   std::unordered_map<Index, Name> dataNames;
   std::unordered_map<Index, Name> elemNames;
 
+  // The names that are already used (either from the names section, or that we
+  // generate as internal names for un-named things).
+  std::unordered_set<Name> usedFunctionNames, usedTableNames, usedMemoryNames,
+    usedGlobalNames, usedTagNames;
+
   Function* currFunction = nullptr;
   // before we see a function (like global init expressions), there is no end of
   // function to check
@@ -1598,12 +1720,33 @@ public:
   void readTags();
 
   static Name escape(Name name);
-  void findAndReadNames();
-  void readFeatures(size_t);
-  void readDylink(size_t);
-  void readDylink0(size_t);
+  void readNames(size_t sectionPos, size_t payloadLen);
+  void readFeatures(size_t sectionPos, size_t payloadLen);
+  void readDylink(size_t payloadLen);
+  void readDylink0(size_t payloadLen);
 
-  Index readMemoryAccess(Address& alignment, Address& offset);
+  // We read code annotations *after* the code section, even though they appear
+  // earlier. That is simpler for us as we note expression locations as we scan
+  // code, and then just need to match them up. To do this, we note the
+  // positions of annotation sections in the first pass, and handle them later.
+  struct AnnotationSectionInfo {
+    // The start position of the section. We will rewind to there to read it.
+    size_t pos;
+    // A lambda that will read the section, from that position.
+    std::function<void()> read;
+  };
+  std::vector<AnnotationSectionInfo> deferredAnnotationSections;
+
+  void readBranchHints(size_t payloadLen);
+  void readInlineHints(size_t payloadLen);
+  void readRemovableIfUnusedHints(size_t payloadLen);
+  void readJSCalledHints(size_t payloadLen);
+  void readIdempotentHints(size_t payloadLen);
+
+  std::tuple<Address, Address, Index, MemoryOrder>
+  readMemoryAccess(bool isAtomic, bool isRMW);
+  std::tuple<Name, Address, Address, MemoryOrder> getAtomicMemarg();
+  std::tuple<Name, Address, Address, MemoryOrder> getRMWMemarg();
   std::tuple<Name, Address, Address> getMemarg();
   MemoryOrder getMemoryOrder(bool isRMW = false);
 
@@ -1611,8 +1754,29 @@ public:
     throw ParseException(text, 0, pos);
   }
 
+  // Allow users to query the target features section features after parsing.
+  FeatureSet getFeaturesSectionFeatures() { return featuresSectionFeatures; }
+
 private:
-  bool hasDWARFSections();
+  // In certain modes we need to note the locations of expressions, to match
+  // them against sections like DWARF or custom annotations. As this incurs
+  // overhead, we only note locations when we actually need to.
+  bool needCodeLocations = false;
+
+  // The features enabled by the target features section, which may be a subset
+  // of the features enabled for the module.
+  FeatureSet featuresSectionFeatures;
+
+  // Scans ahead in the binary to check certain conditions like
+  // needCodeLocations.
+  void preScan();
+
+  // Internal helper for reading a code annotation section for a hint that is
+  // expression offset based. Receives the section name, payload length of the
+  // section and a function to read a single hint (receiving the annotation to
+  // update).
+  template<typename ReadFunc>
+  void readExpressionHints(Name sectionName, size_t payloadLen, ReadFunc read);
 };
 
 } // namespace wasm

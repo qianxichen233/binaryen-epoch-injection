@@ -16,6 +16,8 @@
 
 import sys
 
+assert sys.version_info >= (3, 10), 'requires Python 3.10'
+
 instructions = [
     ("unreachable",    "makeUnreachable()"),
     ("nop",            "makeNop()"),
@@ -204,9 +206,12 @@ instructions = [
     ("i64.extend32_s",      "makeUnary(UnaryOp::ExtendS32Int64)"),
     # atomic instructions
     ("memory.atomic.notify",    "makeAtomicNotify()"),
+    ("struct.wait",             "makeStructWait()"),
+    ("struct.notify",           "makeStructNotify()"),
     ("memory.atomic.wait32",    "makeAtomicWait(Type::i32)"),
     ("memory.atomic.wait64",    "makeAtomicWait(Type::i64)"),
     ("atomic.fence",            "makeAtomicFence()"),
+    ("pause",                   "makePause()"),
     ("i32.atomic.load8_u",      "makeLoad(Type::i32, /*signed=*/false, 1, /*isAtomic=*/true)"),
     ("i32.atomic.load16_u",     "makeLoad(Type::i32, /*signed=*/false, 2, /*isAtomic=*/true)"),
     ("i32.atomic.load",         "makeLoad(Type::i32, /*signed=*/false, 4, /*isAtomic=*/true)"),
@@ -582,6 +587,7 @@ instructions = [
     ("table.fill",           "makeTableFill()"),
     ("table.copy",           "makeTableCopy()"),
     ("table.init",           "makeTableInit()"),
+    ("elem.drop",            "makeElemDrop()"),
     # exception handling instructions
     ("try",                  "makeTry()"),
     ("try_table",            "makeTryTable()"),
@@ -596,24 +602,36 @@ instructions = [
     # Typed function references instructions
     ("call_ref",             "makeCallRef(/*isReturn=*/false)"),
     ("return_call_ref",      "makeCallRef(/*isReturn=*/true)"),
-    # Typed continuations instructions
+    # Stack switching instructions
     ("cont.new",             "makeContNew()"),
     ("cont.bind",            "makeContBind()"),
-    ("resume",               "makeResume()"),
     ("suspend",              "makeSuspend()"),
+    ("resume",               "makeResume()"),
+    ("resume_throw",         "makeResumeThrow()"),
+    ("resume_throw_ref",     "makeResumeThrowRef()"),
+    ("switch",               "makeStackSwitch()"),
     # GC
     ("ref.i31",              "makeRefI31(Unshared)"),
     ("ref.i31_shared",       "makeRefI31(Shared)"),
     ("i31.get_s",            "makeI31Get(true)"),
     ("i31.get_u",            "makeI31Get(false)"),
     ("ref.test",             "makeRefTest()"),
-    ("ref.cast",             "makeRefCast()"),
+    ("ref.cast",             "makeRefCast(false)"),
+    ("ref.cast_desc",        "makeRefCast(true)"),  # Deprecated
+    ("ref.cast_desc_eq",     "makeRefCast(true)"),
+    ("ref.get_desc",         "makeRefGetDesc()"),
     ("br_on_null",           "makeBrOnNull()"),
     ("br_on_non_null",       "makeBrOnNull(true)"),
-    ("br_on_cast",           "makeBrOnCast()"),
-    ("br_on_cast_fail",      "makeBrOnCast(true)"),
-    ("struct.new",           "makeStructNew(false)"),
-    ("struct.new_default",   "makeStructNew(true)"),
+    ("br_on_cast",           "makeBrOnCast(BrOnCast)"),
+    ("br_on_cast_fail",      "makeBrOnCast(BrOnCastFail)"),
+    ("br_on_cast_desc",      "makeBrOnCast(BrOnCastDescEq)"),  # Deprecated
+    ("br_on_cast_desc_fail", "makeBrOnCast(BrOnCastDescEqFail)"),  # Deprecated
+    ("br_on_cast_desc_eq",      "makeBrOnCast(BrOnCastDescEq)"),
+    ("br_on_cast_desc_eq_fail", "makeBrOnCast(BrOnCastDescEqFail)"),
+    ("struct.new",           "makeStructNew(false, false)"),
+    ("struct.new_default",   "makeStructNew(true, false)"),
+    ("struct.new_desc",      "makeStructNew(false, true)"),
+    ("struct.new_default_desc", "makeStructNew(true, true)"),
     ("struct.get",           "makeStructGet()"),
     ("struct.get_s",         "makeStructGet(true)"),
     ("struct.get_u",         "makeStructGet(false)"),
@@ -637,12 +655,23 @@ instructions = [
     ("array.get",            "makeArrayGet()"),
     ("array.get_s",          "makeArrayGet(true)"),
     ("array.get_u",          "makeArrayGet(false)"),
+    ("array.atomic.get",     "makeAtomicArrayGet()"),
+    ("array.atomic.get_s",   "makeAtomicArrayGet(true)"),
+    ("array.atomic.get_u",   "makeAtomicArrayGet(false)"),
     ("array.set",            "makeArraySet()"),
+    ("array.atomic.set",     "makeAtomicArraySet()"),
     ("array.len",            "makeArrayLen()"),
     ("array.copy",           "makeArrayCopy()"),
     ("array.fill",           "makeArrayFill()"),
     ("array.init_data",      "makeArrayInitData()"),
     ("array.init_elem",      "makeArrayInitElem()"),
+    ("array.atomic.rmw.add", "makeArrayRMW(RMWAdd)"),
+    ("array.atomic.rmw.sub", "makeArrayRMW(RMWSub)"),
+    ("array.atomic.rmw.and", "makeArrayRMW(RMWAnd)"),
+    ("array.atomic.rmw.or",  "makeArrayRMW(RMWOr)"),
+    ("array.atomic.rmw.xor", "makeArrayRMW(RMWXor)"),
+    ("array.atomic.rmw.xchg", "makeArrayRMW(RMWXchg)"),
+    ("array.atomic.rmw.cmpxchg", "makeArrayCmpxchg()"),
     ("ref.as_non_null",      "makeRefAs(RefAsNonNull)"),
     ("extern.internalize",   "makeRefAs(AnyConvertExtern)"),  # Deprecated
     ("extern.externalize",   "makeRefAs(ExternConvertAny)"),  # Deprecated
@@ -660,6 +689,7 @@ instructions = [
     ("string.concat",        "makeStringConcat()"),
     ("string.eq",            "makeStringEq(StringEqEqual)"),
     ("string.compare",       "makeStringEq(StringEqCompare)"),
+    ("string.test",          "makeStringTest()"),
     ("stringview_wtf16.get_codeunit", "makeStringWTF16Get()"),
     ("stringview_wtf16.slice",        "makeStringSliceWTF()"),
     # Ignored in input
@@ -735,7 +765,6 @@ class Node:
 
 def instruction_parser():
     """Build a trie out of all the instructions, then emit it as C++ code."""
-    global instructions
     trie = Node()
     inst_length = 0
     for inst, expr in instructions:
@@ -750,7 +779,7 @@ def instruction_parser():
     printer = CodePrinter()
 
     printer.print_line("auto op = *keyword;")
-    printer.print_line("char buf[{}] = {{}};".format(inst_length + 1))
+    printer.print_line(f"char buf[{inst_length + 1}] = {{}};")
     printer.print_line("// Ensure we do not copy more than the buffer can hold")
     printer.print_line("if (op.size() >= sizeof(buf)) {")
     printer.print_line("  goto parse_error;")
@@ -762,16 +791,16 @@ def instruction_parser():
             expr = expr.replace("()", "(ctx, pos, annotations)")
         else:
             expr = expr.replace("(", "(ctx, pos, annotations, ")
-        printer.print_line("if (op == \"{inst}\"sv) {{".format(inst=inst))
+        printer.print_line(f"if (op == \"{inst}\"sv) {{")
         with printer.indent():
-            printer.print_line("CHECK_ERR({expr});".format(expr=expr))
+            printer.print_line(f"CHECK_ERR({expr});")
             printer.print_line("return Ok{};")
         printer.print_line("}")
         printer.print_line("goto parse_error;")
 
     def emit(node, idx=0):
         assert node.children
-        printer.print_line("switch (buf[{}]) {{".format(idx))
+        printer.print_line(f"switch (buf[{idx}]) {{")
         with printer.indent():
             if node.expr:
                 printer.print_line("case '\\0':")
@@ -780,13 +809,13 @@ def instruction_parser():
             children = sorted(node.children.items(), key=lambda pair: pair[0])
             for prefix, child in children:
                 if child.children:
-                    printer.print_line("case '{}': {{".format(prefix[0]))
+                    printer.print_line(f"case '{prefix[0]}': {{")
                     with printer.indent():
                         emit(child, idx + len(prefix))
                     printer.print_line("}")
                 else:
                     assert child.expr
-                    printer.print_line("case '{}':".format(prefix[0]))
+                    printer.print_line(f"case '{prefix[0]}':")
                     with printer.indent():
                         print_leaf(child.expr, child.inst)
             printer.print_line("default: goto parse_error;")
@@ -810,10 +839,6 @@ def print_footer():
 
 
 def main():
-    if sys.version_info.major != 3:
-        import datetime
-        print("It's " + str(datetime.datetime.now().year) + "! Use Python 3!")
-        sys.exit(1)
     print_header()
     instruction_parser()
     print_footer()

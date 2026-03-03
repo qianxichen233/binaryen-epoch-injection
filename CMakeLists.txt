@@ -1,13 +1,11 @@
-# Version set according the the cmake versions available in Ubuntu/Bionic:
-# https://packages.ubuntu.com/focal/cmake
+# Version set according the the cmake version available in Ubuntu/Focal (LTS):
+# https://launchpad.net/ubuntu/focal/+source/cmake
 cmake_minimum_required(VERSION 3.16.3)
 
-# Needed for C++17 (std::variant)
-# TODO(https://github.com/WebAssembly/binaryen/issues/4299): We need
-# to reduce this for compatability with emsdk.
-set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14" CACHE STRING "Minimum OS X deployment version")
+# Needed for C++17 (std::path)
+set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15" CACHE STRING "Minimum OS X deployment version")
 
-project(binaryen LANGUAGES C CXX VERSION 121)
+project(binaryen LANGUAGES C CXX VERSION 126)
 include(GNUInstallDirs)
 
 # The C++ standard whose features are required to build Binaryen.
@@ -31,10 +29,19 @@ endif()
 # more useful error reports from users.
 option(BYN_ENABLE_ASSERTIONS "Enable assertions" ON)
 
-option(BYN_ENABLE_LTO "Build with LTO" Off)
+if(EMSCRIPTEN AND NOT "${CMAKE_BUILD_TYPE}" MATCHES "Debug")
+  # in opt builds, LTO helps so much (>20%) it's worth slow compile times,
+  # so we enable LTO by default in non-debug emscripten builds.
+  set(DEFAULT_LTO ON)
+else()
+  set(DEFAULT_LTO OFF)
+endif()
+option(BYN_ENABLE_LTO "Build with LTO" ${DEFAULT_LTO})
 
 # Turn this off to avoid the dependency on gtest.
 option(BUILD_TESTS "Build GTest-based tests" ON)
+
+option(BUILD_FUZZTEST "Build fuzztest-based tests and fuzzers" OFF)
 
 # Turn this off to build only the library.
 option(BUILD_TOOLS "Build tools" ON)
@@ -47,14 +54,22 @@ endif()
 
 option(BUILD_STATIC_LIB "Build as a static library" OFF)
 if(MSVC)
-  # We don't have dllexport declarations set up for windows yet.
+  # We don't have dllexport declarations set up for Windows yet.
   set(BUILD_STATIC_LIB ON)
 endif()
 
-# Turn this off to install only tools and not static/dynamic libs
+# Advised to turn on when statically linking against musl libc (e.g., in the
+# Alpine Linux build we use for producing official Linux binaries), because
+# musl libc's allocator has very bad performance on heavily multi-threaded
+# workloads / high core count machines. But it also works with dynamic linking
+# with a small performance advantage in some cases over the glibc allocator.
+# See https://github.com/WebAssembly/binaryen/issues/5561.
+option(BUILD_MIMALLOC "Build with mimalloc allocator" OFF)
+
+# Turn this off to install only tools and not static/dynamic libs.
 option(INSTALL_LIBS "Install libraries" ON)
 
-# Turn this on to build only the subset of tools needed for emscripten
+# Turn this on to build only the subset of tools needed for Emscripten.
 option(BUILD_EMSCRIPTEN_TOOLS_ONLY "Build only tools needed by emscripten" OFF)
 
 # Turn this on to build binaryen.js as ES5, with additional compatibility configuration for js_of_ocaml.
@@ -71,9 +86,9 @@ option(EMSCRIPTEN_ENABLE_WASM64 "Enable memory64 in emscripten build" OFF)
 # Turn this on to use pthreads feature in the wasm/BinaryenJS builds
 option(EMSCRIPTEN_ENABLE_PTHREADS "Enable pthreads in emscripten build" OFF)
 
-# Turn this off to generate a separate .wasm file instead of packaging it into the JS.
-# This is useful for debugging, performance analysis, and other testing.
-option(EMSCRIPTEN_ENABLE_SINGLE_FILE "Enable SINGLE_FILE mode in emscripten build" ON)
+# Turn this on to generate a single .js file with the Wasm file embedded within
+# it. This is useful for packaging and distrubting binaryen as a single file.
+option(EMSCRIPTEN_ENABLE_SINGLE_FILE "Enable SINGLE_FILE mode in emscripten build" OFF)
 
 option(ENABLE_WERROR "Enable -Werror" ON)
 
@@ -105,9 +120,14 @@ find_package(Threads REQUIRED)
 
 function(add_compile_flag value)
   message(STATUS "Building with ${value}")
-  foreach(variable CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
-    set(${variable} "${${variable}} ${value}" PARENT_SCOPE)
-  endforeach(variable)
+  # You can use the optional second argument to suppress passing C++-only flags to the C compiler.
+  if(ARGV1 STREQUAL "CXX_ONLY")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${value}" PARENT_SCOPE)
+  else()
+    foreach(variable CMAKE_C_FLAGS CMAKE_CXX_FLAGS)
+      set(${variable} "${${variable}} ${value}" PARENT_SCOPE)
+    endforeach(variable)
+  endif()
 endfunction()
 
 function(add_debug_compile_flag value)
@@ -161,8 +181,8 @@ endfunction()
 
 function(binaryen_add_executable name sources)
   add_executable(${name} ${sources})
-  target_link_libraries(${name} Threads::Threads)
-  target_link_libraries(${name} binaryen)
+  target_link_libraries(${name} PRIVATE Threads::Threads)
+  target_link_libraries(${name} PRIVATE binaryen)
   binaryen_setup_rpath(${name})
   install(TARGETS ${name} DESTINATION ${CMAKE_INSTALL_BINDIR})
 endfunction()
@@ -199,6 +219,12 @@ if(NOT MSVC AND NOT EMSCRIPTEN)
   endif()
 endif()
 
+# The version of clang currently on Binaryen's Mac CI doesn't seem to support
+# this flag, so don't enable it by default. LTO also enables lld separately.
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND NOT APPLE)
+  add_link_flag("-fuse-ld=lld")
+endif()
+
 if(BYN_ENABLE_LTO)
   if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(FATAL_ERROR "ThinLTO is only supported by clang")
@@ -207,6 +233,11 @@ if(BYN_ENABLE_LTO)
   set_property(GLOBAL APPEND PROPERTY JOB_POOLS link_job_pool=2)
   set(CMAKE_JOB_POOL_LINK link_job_pool)
   add_compile_flag("-flto=thin")
+  if(EMSCRIPTEN)
+    # Under emscripten we also add `-flto` to the linker flags to tell the
+    # compiler driver to choose LTO versions of the system libraries.
+    add_link_flag("-flto=thin")
+  endif()
 endif()
 
 if(MSVC)
@@ -246,12 +277,11 @@ if(MSVC)
         CMAKE_C_FLAGS_MINSIZEREL)
       string(REGEX REPLACE "(^| )[/-]D *NDEBUG($| )" " "
         "${flags_var_to_scrub}" "${${flags_var_to_scrub}}")
-
-      # Compile with `/MT` to link against `libcmt.lib`, removing a dependency
-      # on `msvcrt.dll`. May result in slightly larger binaries but they should
-      # be more portable across systems.
-      string(REPLACE "/MD" "/MT" ${flags_var_to_scrub} "${${flags_var_to_scrub}}")
     endforeach()
+    # Compile with `/MT` to link against `libcmt.lib`, removing a dependency
+    # on `msvcrt.dll`. May result in slightly larger binaries but they should
+    # be more portable across systems.
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded")
   endif()
 
   add_link_flag("/STACK:8388608")
@@ -259,7 +289,10 @@ if(MSVC)
 else() # MSVC
 
   add_compile_flag("-fno-omit-frame-pointer")
-  add_compile_flag("-fno-rtti")
+  if(NOT BUILD_FUZZTEST)
+    # fuzztest depends on RTTIs.
+    add_compile_flag("-fno-rtti" "CXX_ONLY")
+  endif()
   if(WIN32)
     add_compile_flag("-D_GNU_SOURCE")
     add_compile_flag("-D__STDC_FORMAT_MACROS")
@@ -277,28 +310,9 @@ else() # MSVC
     # explicitly undefine it:
     add_nondebug_compile_flag("-UNDEBUG")
   endif()
-  if(NOT APPLE AND NOT "${CMAKE_CXX_FLAGS}" MATCHES "-fsanitize")
-    # This flag only applies to shared libraries so don't use add_link_flag
-    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
-  endif()
 endif()
 
 if(EMSCRIPTEN)
-  # Note: to debug with DWARF you will usually want to enable BIGINT support, as
-  # that helps avoid running Binaryen on the wasm after link. Binaryen's DWARF
-  # rewriting has known limitations, so avoiding it during link is recommended
-  # where possible (like local debugging).
-  #
-  # Note that this is debug info for Binaryen itself, that is, when you are
-  # debugging Binaryen source code. This flag has no impact on what Binaryen
-  # does when run on wasm files.
-  option(ENABLE_BIGINT "Enable wasm BigInt support" OFF)
-  if(ENABLE_BIGINT)
-    add_link_flag("-sWASM_BIGINT")
-   else()
-    add_link_flag("-sWASM_BIGINT=0")
-  endif()
-
   if("${CMAKE_BUILD_TYPE}" MATCHES "Release")
     # Extra check that cmake has set -O3 in its release flags.
     # This is really as an assertion that cmake is behaving as we expect.
@@ -333,7 +347,6 @@ if(EMSCRIPTEN)
     add_link_flag("-sENVIRONMENT=web,worker")
     add_link_flag("-sINVOKE_RUN=0")
     add_link_flag("-sEXPORTED_RUNTIME_METHODS=run,callMain,FS")
-    add_link_flag("-sMODULARIZE")
     add_link_flag("-sEXPORT_ES6")
     add_link_flag("-sFILESYSTEM")
     add_link_flag("-sFORCE_FILESYSTEM")
@@ -341,13 +354,11 @@ if(EMSCRIPTEN)
     # On Node.js, make the tools immediately usable.
     add_link_flag("-sNODERAWFS")
   endif()
-    # in opt builds, LTO helps so much (>20%) it's worth slow compile times
-    add_nondebug_compile_flag("-flto")
-    if(EMSCRIPTEN_ENABLE_WASM64)
-      add_compile_flag("-sMEMORY64 -Wno-experimental")
-      add_link_flag("-sMEMORY64")
-    endif()
+  if(EMSCRIPTEN_ENABLE_WASM64)
+    add_compile_flag("-sMEMORY64")
+    add_link_flag("-sMEMORY64")
   endif()
+endif()
 
 # clang doesn't print colored diagnostics when invoked from Ninja
 if(UNIX AND CMAKE_GENERATOR STREQUAL "Ninja")
@@ -417,6 +428,25 @@ else() # MSVC
     add_compile_flag("-Wno-deprecated-declarations")
   endif()
 
+  if(BUILD_FUZZTEST)
+    add_compile_flag("-DFUZZTEST")
+    fuzztest_setup_fuzzing_flags()
+
+    # Enabling fuzzing mode turns on sanitizers, which turn on additional
+    # warnings. To keep the build working, do not treat these warnings as
+    # errors.
+    add_compile_flag("-Wno-error=maybe-uninitialized")
+    add_compile_flag("-Wno-error=uninitialized")
+    add_compile_flag("-Wno-error=array-bounds")
+    add_compile_flag("-Wno-error=stringop-overread")
+    add_compile_flag("-Wno-error=missing-field-initializers")
+  endif()
+
+  if(NOT APPLE AND NOT "${CMAKE_CXX_FLAGS}" MATCHES "-fsanitize")
+    # This flag only applies to shared libraries so don't use add_link_flag
+    set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,--no-undefined")
+  endif()
+
 endif()
 
 # Declare libbinaryen
@@ -428,10 +458,30 @@ if(BUILD_STATIC_LIB)
 else()
   message(STATUS "Building libbinaryen as shared library.")
   add_library(binaryen SHARED)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # Disable interposition and resolve Binaryen symbols locally.
+    add_link_flag("-Bsymbolic")
+  endif()
 endif()
-target_link_libraries(binaryen Threads::Threads)
+target_link_libraries(binaryen PUBLIC Threads::Threads)
+binaryen_setup_rpath(binaryen)
 if(BUILD_LLVM_DWARF)
-  target_link_libraries(binaryen llvm_dwarf)
+  target_link_libraries(binaryen PRIVATE llvm_dwarf)
+endif()
+
+if(BUILD_MIMALLOC)
+  if(NOT(CMAKE_SYSTEM_NAME STREQUAL "Linux") OR EMSCRIPTEN)
+    message(FATAL_ERROR "Linking mimalloc is only supported on Linux.")
+  endif()
+  message(STATUS "Building with mimalloc allocator.")
+  if(BUILD_STATIC_LIB)
+    target_link_libraries(binaryen PRIVATE "-Wl,--push-state,--as-needed")
+    target_link_libraries(binaryen PRIVATE mimalloc-static)
+    target_link_libraries(binaryen PRIVATE "-Wl,--pop-state")
+  else()
+    target_link_options(mimalloc PRIVATE "-Wl,--as-needed")
+    target_link_libraries(binaryen PRIVATE mimalloc)
+  endif()
 endif()
 
 add_subdirectory(src/ir)
@@ -480,87 +530,46 @@ endif()
 # binaryen.js
 #
 # Note that we can't emit binaryen.js directly, as there is libbinaryen already
-# declared earlier, so we create binaryen_wasm/js.js, which must then be copied.
+# declared earlier, so we create binaryen_js.js, which must then be copied.
 if(EMSCRIPTEN)
-  # binaryen.js WebAssembly variant
-  add_executable(binaryen_wasm ${binaryen_SOURCES})
-  target_link_libraries(binaryen_wasm binaryen)
-  target_link_libraries(binaryen_wasm "-sFILESYSTEM")
-  target_link_libraries(binaryen_wasm "-sEXPORT_NAME=Binaryen")
-  target_link_libraries(binaryen_wasm "-sNODERAWFS=0")
+  add_executable(binaryen_js ${binaryen_HEADERS})
+  # For the emscripten build we link against libbinaryen wih `--whole-archive`.
+  # Without this, the EMSCRIPTEN_KEEPALIVE symbols within the library would
+  # be ignored.
+  target_link_libraries(binaryen_js PRIVATE binaryen)
+  target_link_libraries(binaryen_js PRIVATE "-sFILESYSTEM")
+  target_link_libraries(binaryen_js PRIVATE "-sEXPORT_NAME=Binaryen")
+  target_link_libraries(binaryen_js PRIVATE "-sNODERAWFS=0")
   # Do not error on the repeated NODERAWFS argument
-  target_link_libraries(binaryen_wasm "-Wno-unused-command-line-argument")
+  target_link_libraries(binaryen_js PRIVATE "-Wno-unused-command-line-argument")
   # Emit a single file for convenience of people using binaryen.js as a library,
   # so they only need to distribute a single file.
   if(EMSCRIPTEN_ENABLE_SINGLE_FILE)
-    target_link_libraries(binaryen_wasm "-sSINGLE_FILE")
+    target_link_libraries(binaryen_js PRIVATE "-sSINGLE_FILE")
   endif()
-  target_link_libraries(binaryen_wasm "-sEXPORT_ES6")
-  target_link_libraries(binaryen_wasm "-sEXPORTED_RUNTIME_METHODS=stringToUTF8OnStack,stringToAscii")
-  target_link_libraries(binaryen_wasm "-sEXPORTED_FUNCTIONS=_malloc,_free")
-  target_link_libraries(binaryen_wasm "--post-js=${CMAKE_CURRENT_SOURCE_DIR}/src/js/binaryen.js-post.js")
-  target_link_libraries(binaryen_wasm "-msign-ext")
-  target_link_libraries(binaryen_wasm "-mbulk-memory")
-  target_link_libraries(binaryen_wasm optimized "--closure=1")
+  if(JS_OF_OCAML)
+    # js_of_ocaml needs a specified variable with special comment to provide the library to consumer
+    target_link_libraries(binaryen_js PRIVATE "--extern-pre-js=${CMAKE_CURRENT_SOURCE_DIR}/src/js/binaryen.jsoo-extern-pre.js")
+    # Currently, js_of_ocaml can only process ES5 code
+    target_link_libraries(binaryen_js PRIVATE optimized "--closure-args=\"--language_out=ECMASCRIPT5\"")
+  else()
+    target_link_libraries(binaryen_js PRIVATE "-sEXPORT_ES6")
+  endif()
+  target_link_libraries(binaryen_js PRIVATE "-sEXPORTED_RUNTIME_METHODS=stringToUTF8OnStack,stringToAscii")
+  target_link_libraries(binaryen_js PRIVATE "-sEXPORTED_FUNCTIONS=_malloc,_free,__i32_load")
+  target_link_libraries(binaryen_js PRIVATE "--post-js=${CMAKE_CURRENT_SOURCE_DIR}/src/js/binaryen.js-post.js")
+  target_link_libraries(binaryen_js PRIVATE optimized "--closure=1")
   # TODO: Fix closure warnings! (#5062)
-  target_link_libraries(binaryen_wasm optimized "-Wno-error=closure")
-  target_link_libraries(binaryen_wasm optimized "-flto")
-  target_link_libraries(binaryen_wasm debug "--profiling")
+  target_link_libraries(binaryen_js PRIVATE optimized "-Wno-error=closure")
+  target_link_libraries(binaryen_js PRIVATE debug "--profiling")
   # Avoid catching exit as that can confuse error reporting in Node,
   # see https://github.com/emscripten-core/emscripten/issues/17228
-  target_link_libraries(binaryen_wasm "-sNODEJS_CATCH_EXIT=0")
-  install(TARGETS binaryen_wasm DESTINATION ${CMAKE_INSTALL_BINDIR})
-
-  # binaryen.js JavaScript variant
-  add_executable(binaryen_js ${binaryen_SOURCES})
-  target_link_libraries(binaryen_js binaryen)
-  target_link_libraries(binaryen_js "-sWASM=0")
-  target_link_libraries(binaryen_js "-sWASM_ASYNC_COMPILATION=0")
-  if(${CMAKE_CXX_COMPILER_VERSION} STREQUAL "6.0.1")
-    # only valid with fastcomp and WASM=0
-    target_link_libraries(binaryen_js "-sELIMINATE_DUPLICATE_FUNCTIONS")
-  endif()
-  # Disabling filesystem and setting web environment for js_of_ocaml
-  # so it doesn't try to detect the "node" environment
-  if(JS_OF_OCAML)
-    target_link_libraries(binaryen_js "-sFILESYSTEM=0")
-    target_link_libraries(binaryen_js "-sENVIRONMENT=web,worker")
-  else()
-    target_link_libraries(binaryen_js "-sFILESYSTEM=1")
-  endif()
-  target_link_libraries(binaryen_js "-sNODERAWFS=0")
-  # Do not error on the repeated NODERAWFS argument
-  target_link_libraries(binaryen_js "-Wno-unused-command-line-argument")
-  if(EMSCRIPTEN_ENABLE_SINGLE_FILE)
-    target_link_libraries(binaryen_js "-sSINGLE_FILE")
-  endif()
-  target_link_libraries(binaryen_js "-sEXPORT_NAME=Binaryen")
-  # Currently, js_of_ocaml can only process ES5 code
-  if(JS_OF_OCAML)
-    target_link_libraries(binaryen_js "-sEXPORT_ES6=0")
-  else()
-    target_link_libraries(binaryen_js "-sEXPORT_ES6=1")
-  endif()
-  target_link_libraries(binaryen_js "-sEXPORTED_RUNTIME_METHODS=stringToUTF8OnStack,stringToAscii")
-  target_link_libraries(binaryen_js "-sEXPORTED_FUNCTIONS=_malloc,_free")
-  target_link_libraries(binaryen_js "--post-js=${CMAKE_CURRENT_SOURCE_DIR}/src/js/binaryen.js-post.js")
-  # js_of_ocaml needs a specified variable with special comment to provide the library to consumers
-  if(JS_OF_OCAML)
-    target_link_libraries(binaryen_js "--extern-pre-js=${CMAKE_CURRENT_SOURCE_DIR}/src/js/binaryen.jsoo-extern-pre.js")
-  endif()
-  target_link_libraries(binaryen_js optimized "--closure=1")
-  # Currently, js_of_ocaml can only process ES5 code
-  if(JS_OF_OCAML)
-    target_link_libraries(binaryen_js optimized "--closure-args=\"--language_out=ECMASCRIPT5\"")
-  endif()
-  # TODO: Fix closure warnings! (#5062)
-  target_link_libraries(binaryen_js optimized "-Wno-error=closure")
-  target_link_libraries(binaryen_js optimized "-flto")
-  target_link_libraries(binaryen_js debug "--profiling")
-  target_link_libraries(binaryen_js debug "-sASSERTIONS")
-  # Avoid catching exit as that can confuse error reporting in Node,
-  # see https://github.com/emscripten-core/emscripten/issues/17228
-  target_link_libraries(binaryen_js "-sNODEJS_CATCH_EXIT=0")
+  target_link_libraries(binaryen_js PRIVATE "-sNODEJS_CATCH_EXIT=0")
+  # Don't exit the process on a fatal error, instead throw, so that JS can
+  # catch.
+  add_compile_flag("-DTHROW_ON_FATAL")
+  # Add support for printing C++ exceptions from JS.
+  target_link_libraries(binaryen_js PRIVATE "-sEXPORT_EXCEPTION_HANDLING_HELPERS")
   install(TARGETS binaryen_js DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
 

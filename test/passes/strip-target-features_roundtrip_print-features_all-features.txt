@@ -14,11 +14,13 @@
 --enable-extended-const
 --enable-strings
 --enable-multimemory
---enable-typed-continuations
+--enable-stack-switching
 --enable-shared-everything
 --enable-fp16
 --enable-bulk-memory-opt
 --enable-call-indirect-overlong
+--enable-custom-descriptors
+--enable-relaxed-atomics
 (module
  (type $0 (func (result v128 externref)))
  (func $foo (type $0) (result v128 externref)

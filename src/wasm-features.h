@@ -46,7 +46,7 @@ struct FeatureSet {
     ExtendedConst = 1 << 13,
     Strings = 1 << 14,
     MultiMemory = 1 << 15,
-    TypedContinuations = 1 << 16,
+    StackSwitching = 1 << 16,
     SharedEverything = 1 << 17,
     FP16 = 1 << 18,
     BulkMemoryOpt = 1 << 19, // Just the memory.copy and fill operations
@@ -54,11 +54,13 @@ struct FeatureSet {
     // that we can automatically generate tool flags that set it, but otherwise
     // it does nothing. Binaryen always accepts LEB call-indirect encodings.
     CallIndirectOverlong = 1 << 20,
+    CustomDescriptors = 1 << 21,
+    RelaxedAtomics = 1 << 22,
     MVP = None,
     // Keep in sync with llvm default features:
     // https://github.com/llvm/llvm-project/blob/c7576cb89d6c95f03968076e902d3adfd1996577/clang/lib/Basic/Targets/WebAssembly.cpp#L150-L153
     Default = SignExt | MutableGlobals,
-    All = (1 << 21) - 1,
+    All = (1 << 23) - 1,
   };
 
   static std::string toString(Feature f) {
@@ -95,8 +97,8 @@ struct FeatureSet {
         return "strings";
       case MultiMemory:
         return "multimemory";
-      case TypedContinuations:
-        return "typed-continuations";
+      case StackSwitching:
+        return "stack-switching";
       case SharedEverything:
         return "shared-everything";
       case FP16:
@@ -105,9 +107,16 @@ struct FeatureSet {
         return "bulk-memory-opt";
       case CallIndirectOverlong:
         return "call-indirect-overlong";
-      default:
-        WASM_UNREACHABLE("unexpected feature");
+      case CustomDescriptors:
+        return "custom-descriptors";
+      case RelaxedAtomics:
+        return "relaxed-atomics";
+      case MVP:
+      case Default:
+      case All:
+        break;
     }
+    WASM_UNREACHABLE("unexpected feature");
   }
 
   std::string toString() const {
@@ -149,9 +158,7 @@ struct FeatureSet {
   bool hasExtendedConst() const { return (features & ExtendedConst) != 0; }
   bool hasStrings() const { return (features & Strings) != 0; }
   bool hasMultiMemory() const { return (features & MultiMemory) != 0; }
-  bool hasTypedContinuations() const {
-    return (features & TypedContinuations) != 0;
-  }
+  bool hasStackSwitching() const { return (features & StackSwitching) != 0; }
   bool hasSharedEverything() const {
     return (features & SharedEverything) != 0;
   }
@@ -161,6 +168,10 @@ struct FeatureSet {
     assert(has || !hasBulkMemory());
     return has;
   }
+  bool hasCustomDescriptors() const {
+    return (features & CustomDescriptors) != 0;
+  }
+  bool hasRelaxedAtomics() const { return (features & RelaxedAtomics) != 0; }
   bool hasAll() const { return (features & All) != 0; }
 
   void set(FeatureSet f, bool v = true) {
@@ -182,10 +193,12 @@ struct FeatureSet {
   void setExtendedConst(bool v = true) { set(ExtendedConst, v); }
   void setStrings(bool v = true) { set(Strings, v); }
   void setMultiMemory(bool v = true) { set(MultiMemory, v); }
-  void setTypedContinuations(bool v = true) { set(TypedContinuations, v); }
+  void setStackSwitching(bool v = true) { set(StackSwitching, v); }
   void setSharedEverything(bool v = true) { set(SharedEverything, v); }
   void setFP16(bool v = true) { set(FP16, v); }
   void setBulkMemoryOpt(bool v = true) { set(BulkMemoryOpt, v); }
+  void setCustomDescriptors(bool v = true) { set(CustomDescriptors, v); }
+  void setRelaxedAtomics(bool v = true) { set(RelaxedAtomics, v); }
   void setMVP() { features = MVP; }
   void setAll() { features = All; }
 

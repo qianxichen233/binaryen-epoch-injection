@@ -61,7 +61,7 @@ struct GenerateDynCalls : public WalkerPass<PostWalker<GenerateDynCalls>> {
       std::vector<Name> tableSegmentData;
       ElementUtils::iterElementSegmentFunctionNames(
         it->get(), [&](Name name, Index) {
-          generateDynCallThunk(wasm->getFunction(name)->type);
+          generateDynCallThunk(wasm->getFunction(name)->type.getHeapType());
         });
     }
   }
@@ -70,7 +70,7 @@ struct GenerateDynCalls : public WalkerPass<PostWalker<GenerateDynCalls>> {
     // Generate dynCalls for invokes
     if (func->imported() && func->module == ENV &&
         func->base.startsWith("invoke_")) {
-      Signature sig = func->type.getSignature();
+      Signature sig = func->type.getHeapType().getSignature();
       // The first parameter is a pointer to the original function that's called
       // by the invoke, so skip it
       std::vector<Type> newParams(sig.params.begin() + 1, sig.params.end());
@@ -110,10 +110,7 @@ static void exportFunction(Module& wasm, Name name, bool must_export) {
   if (wasm.getExportOrNull(name)) {
     return; // Already exported
   }
-  auto exp = new Export;
-  exp->name = exp->value = name;
-  exp->kind = ExternalKind::Function;
-  wasm.addExport(exp);
+  wasm.addExport(new Export(name, ExternalKind::Function, name));
 }
 
 void GenerateDynCalls::generateDynCallThunk(HeapType funcType) {
@@ -158,7 +155,11 @@ void GenerateDynCalls::generateDynCallThunk(HeapType funcType) {
     params.push_back(param);
   }
   auto f = builder.makeFunction(
-    name, std::move(namedParams), Signature(Type(params), sig.results), {});
+    name,
+    std::move(namedParams),
+    Type(Signature(Type(params), sig.results), NonNullable, Exact),
+    {},
+    nullptr);
   f->hasExplicitName = true;
   Expression* fptr = builder.makeLocalGet(0, table->addressType);
   std::vector<Expression*> args;

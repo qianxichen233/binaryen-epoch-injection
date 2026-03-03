@@ -133,16 +133,19 @@ struct Metrics
         baseline = sizeAfterGlobalCleanup(&test);
       }
       for (auto& exp : module->exports) {
-        // create a test module where we remove the export and then see how much
-        // can be removed thanks to that
-        Module test;
-        ModuleUtils::copyModule(*module, test);
-        test.removeExport(exp->name);
-        counts.clear();
-        counts["[removable-bytes-without-it]"] =
-          baseline - sizeAfterGlobalCleanup(&test);
-        printCounts(std::string("export: ") + exp->name.toString() + " (" +
-                    exp->value.toString() + ')');
+        // Removing a type export will not remove any code
+        if (auto* name = exp->getInternalName()) {
+          // create a test module where we remove the export and then see how
+          // much can be removed thanks to that
+          Module test;
+          ModuleUtils::copyModule(*module, test);
+          test.removeExport(exp->name);
+          counts.clear();
+          counts["[removable-bytes-without-it]"] =
+            baseline - sizeAfterGlobalCleanup(&test);
+          printCounts(std::string("export: ") + exp->name.toString() + " (" +
+                      name->toString() + ')');
+        }
       }
       // check how much size depends on the start method
       if (!module->start.isNull()) {
@@ -192,16 +195,17 @@ struct Metrics
     keys.push_back("[total]");
     counts["[total]"] = total;
     // sort
-    sort(keys.begin(), keys.end(), [](const char* a, const char* b) -> bool {
-      // Sort the [..] ones first.
-      if (a[0] == '[' && b[0] != '[') {
-        return true;
-      }
-      if (a[0] != '[' && b[0] == '[') {
-        return false;
-      }
-      return strcmp(b, a) > 0;
-    });
+    std::sort(
+      keys.begin(), keys.end(), [](const char* a, const char* b) -> bool {
+        // Sort the [..] ones first.
+        if (a[0] == '[' && b[0] != '[') {
+          return true;
+        }
+        if (a[0] != '[' && b[0] == '[') {
+          return false;
+        }
+        return strcmp(b, a) > 0;
+      });
     o << title << "\n";
     for (auto* key : keys) {
       auto value = counts[key];

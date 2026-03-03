@@ -18,8 +18,16 @@
 // Apply more specific subtypes to type fields where possible, where all the
 // writes to that field in the entire program allow doing so.
 //
+// TODO: handle arrays and not just structs.
+//
+// The GUFA variant of this uses GUFA to infer types, which performs a (slow)
+// whole-program inference, rather than just scan struct/array operations by
+// themselves.
+//
 
+#include "ir/find_all.h"
 #include "ir/lubs.h"
+#include "ir/possible-contents.h"
 #include "ir/struct-utils.h"
 #include "ir/type-updating.h"
 #include "ir/utils.h"
@@ -53,7 +61,18 @@ struct FieldInfoScanner
                       HeapType type,
                       Index index,
                       FieldInfo& info) {
-    info.note(expr->type);
+    if (index == StructUtils::DescriptorIndex) {
+      // We cannot continue on below, where we index into the vector of values.
+      return;
+    }
+
+    auto noted = expr->type;
+    // Do not introduce new exact fields that might requires invalid
+    // casts. Keep any existing exact fields, though.
+    if (type.getStruct().fields[index].type.isInexact()) {
+      noted = noted.withInexactIfNoCustomDescs(getModule()->features);
+    }
+    info.note(noted);
   }
 
   void
@@ -67,13 +86,25 @@ struct FieldInfoScanner
     info.note(fieldType);
   }
 
-  void noteCopy(HeapType type, Index index, FieldInfo& info) {
-    // Copies do not add any type requirements at all: the type will always be
-    // read and written to a place with the same type.
+  void noteCopy(StructGet* get, Type type, Index index, FieldInfo& info) {
+    // Copies with identical sources and destinations do not add any type
+    // requirements.
+    auto srcType = get->ref->type.getHeapType();
+    auto dstType = type.getHeapType();
+    if (srcType == dstType && get->index == index) {
+      return;
+    }
+    // Otherwise we must note the written type.
+    noteExpression(get, dstType, index, info);
   }
 
   void noteRead(HeapType type, Index index, FieldInfo& info) {
     // Nothing to do for a read, we just care about written values.
+  }
+
+  void noteRMW(Expression* expr, HeapType type, Index index, FieldInfo& info) {
+    // We must not refine past the RMW value type.
+    info.note(expr->type);
   }
 
   Properties::FallthroughBehavior getFallthroughBehavior() {
@@ -99,7 +130,15 @@ struct TypeRefining : public Pass {
   // Only affects GC type declarations and struct.gets.
   bool requiresNonNullableLocalFixups() override { return false; }
 
+  bool gufa;
+
+  TypeRefining(bool gufa) : gufa(gufa) {}
+
+  // The final information we inferred about struct usage, that we then use to
+  // optimize.
   StructUtils::StructValuesMap<FieldInfo> finalInfos;
+
+  using Propagator = StructUtils::TypeHierarchyPropagator<FieldInfo>;
 
   void run(Module* module) override {
     if (!module->features.hasGC()) {
@@ -110,6 +149,20 @@ struct TypeRefining : public Pass {
       Fatal() << "TypeRefining requires --closed-world";
     }
 
+    Propagator propagator(*module);
+
+    // Compute our main data structure, finalInfos, either normally or using
+    // GUFA.
+    if (!gufa) {
+      computeFinalInfos(module, propagator);
+    } else {
+      computeFinalInfosGUFA(module, propagator);
+    }
+
+    useFinalInfos(module, propagator);
+  }
+
+  void computeFinalInfos(Module* module, Propagator& propagator) {
     // Find and analyze struct operations inside each function.
     StructUtils::FunctionStructValuesMap<FieldInfo> functionNewInfos(*module),
       functionSetGetInfos(*module);
@@ -127,14 +180,83 @@ struct TypeRefining : public Pass {
     // able to contain that type. Propagate things written using set to subtypes
     // as well, as the reference might be to a supertype if the field is present
     // there.
-    StructUtils::TypeHierarchyPropagator<FieldInfo> propagator(*module);
     propagator.propagateToSuperTypes(combinedNewInfos);
     propagator.propagateToSuperAndSubTypes(combinedSetGetInfos);
 
     // Combine everything together.
     combinedNewInfos.combineInto(finalInfos);
     combinedSetGetInfos.combineInto(finalInfos);
+  }
 
+  void computeFinalInfosGUFA(Module* module, Propagator& propagator) {
+    // Compute the oracle, then simply apply it.
+    // TODO: Consider doing this in GUFA.cpp, where we already computed the
+    //       oracle. That would require refactoring out the rest of this pass to
+    //       a shared location. Alternatively, perhaps we can reuse the computed
+    //       oracle, but any pass that changes anything would need to invalidate
+    //       it...
+    ContentOracle oracle(*module, getPassOptions());
+    auto allTypes = ModuleUtils::collectHeapTypes(*module);
+    for (auto type : allTypes) {
+      if (type.isStruct()) {
+        auto& fields = type.getStruct().fields;
+        // Update the inexact entry because that's what we will query later.
+        auto& infos = finalInfos[{type, Inexact}];
+        for (Index i = 0; i < fields.size(); i++) {
+          auto gufaType = oracle.getContents(DataLocation{type, i}).getType();
+          // Do not introduce new exact fields that might requires invalid
+          // casts. Keep any existing exact fields, though.
+          if (!fields[i].type.isExact()) {
+            gufaType = gufaType.withInexactIfNoCustomDescs(module->features);
+          }
+          // Do not use the GUFA type if it is a continuation, as we cannot add
+          // casts to fix up issues later. Instead, use the original type.
+          if (gufaType.isContinuation()) {
+            gufaType = fields[i].type;
+          }
+          infos[i] = LUBFinder(gufaType);
+        }
+      }
+    }
+
+    // Take into account possible problems. This pass only refines struct
+    // fields, and when we refine in a way that exceeds the wasm type system
+    // then we fix that up with a cast (see below). However, we cannot use casts
+    // in all places, specifically in globals, so we must account for that.
+    for (auto& global : module->globals) {
+      if (global->imported()) {
+        continue;
+      }
+
+      // Find StructNews, which are the one thing that can appear in a global
+      // init that is affected by our optimizations.
+      for (auto* structNew : FindAll<StructNew>(global->init).list) {
+        if (structNew->isWithDefault()) {
+          continue;
+        }
+
+        auto type = structNew->type.getHeapType();
+        auto& infos = finalInfos[{type, Inexact}];
+        auto& fields = type.getStruct().fields;
+        for (Index i = 0; i < fields.size(); i++) {
+          // We are in a situation like this:
+          //
+          //  (struct.new $A
+          //   (global.get or such
+          //
+          // To avoid ending up requiring a cast later, the type of our child
+          // must fit perfectly in the field it is written to.
+          auto childType = structNew->operands[i]->type;
+          infos[i].note(childType);
+        }
+      }
+    }
+
+    // Propagate to supertypes, so no field is less refined than its super.
+    propagator.propagateToSuperTypes(finalInfos);
+  }
+
+  void useFinalInfos(Module* module, Propagator& propagator) {
     // While we do the following work, see if we have anything to optimize, so
     // that we can avoid wasteful work later if not.
     bool canOptimize = false;
@@ -178,7 +300,9 @@ struct TypeRefining : public Pass {
       auto& fields = type.getStruct().fields;
       for (Index i = 0; i < fields.size(); i++) {
         auto oldType = fields[i].type;
-        auto& info = finalInfos[type][i];
+        // Use inexact because exact info will have been propagated up to
+        // inexact entries but not necessarily vice versa.
+        auto& info = finalInfos[{type, Inexact}][i];
         if (!info.noted()) {
           info = LUBFinder(oldType);
         }
@@ -192,11 +316,11 @@ struct TypeRefining : public Pass {
           // public, unchanged since we cannot optimize it
           Type newSuperType;
           if (!publicTypesSet.count(*super)) {
-            newSuperType = finalInfos[*super][i].getLUB();
+            newSuperType = finalInfos[{*super, Inexact}][i].getLUB();
           } else {
             newSuperType = superFields[i].type;
           }
-          auto& info = finalInfos[type][i];
+          auto& info = finalInfos[{type, Inexact}][i];
           auto newType = info.getLUB();
           if (!Type::isSubType(newType, newSuperType)) {
             // To ensure we are a subtype of the super's field, simply copy that
@@ -231,7 +355,7 @@ struct TypeRefining : public Pass {
       // After all those decisions, see if we found anything to optimize.
       for (Index i = 0; i < fields.size(); i++) {
         auto oldType = fields[i].type;
-        auto& lub = finalInfos[type][i];
+        auto& lub = finalInfos[{type, Inexact}][i];
         auto newType = lub.getLUB();
         if (newType != oldType) {
           canOptimize = true;
@@ -275,7 +399,8 @@ struct TypeRefining : public Pass {
         Type newFieldType;
         if (!curr->ref->type.isNull()) {
           auto oldType = curr->ref->type.getHeapType();
-          newFieldType = parent.finalInfos[oldType][curr->index].getLUB();
+          newFieldType =
+            parent.finalInfos[{oldType, Inexact}][curr->index].getLUB();
         }
 
         if (curr->ref->type.isNull() || newFieldType == Type::unreachable ||
@@ -340,7 +465,8 @@ struct TypeRefining : public Pass {
           if (!oldType.isRef()) {
             continue;
           }
-          auto newType = parent.finalInfos[oldStructType][i].getLUB();
+          auto newType =
+            parent.finalInfos[{oldStructType, Inexact}][i].getLUB();
           newFields[i].type = getTempType(newType);
         }
       }
@@ -422,6 +548,7 @@ struct TypeRefining : public Pass {
 
 } // anonymous namespace
 
-Pass* createTypeRefiningPass() { return new TypeRefining(); }
+Pass* createTypeRefiningPass() { return new TypeRefining(false); }
+Pass* createTypeRefiningGUFAPass() { return new TypeRefining(true); }
 
 } // namespace wasm

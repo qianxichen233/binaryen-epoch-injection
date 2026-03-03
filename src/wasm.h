@@ -33,9 +33,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "ir/import-names.h"
 #include "literal.h"
-#include "mixed_arena.h"
 #include "support/index.h"
+#include "support/mixed_arena.h"
 #include "support/name.h"
 #include "wasm-features.h"
 #include "wasm-type.h"
@@ -65,7 +66,7 @@ struct Address {
   }
 };
 
-enum class MemoryOrder {
+enum class MemoryOrder : uint8_t {
   Unordered,
   SeqCst,
   AcqRel,
@@ -608,6 +609,8 @@ enum BrOnOp {
   BrOnNonNull,
   BrOnCast,
   BrOnCastFail,
+  BrOnCastDescEq,
+  BrOnCastDescEqFail,
 };
 
 enum StringNewOp {
@@ -683,6 +686,7 @@ public:
     AtomicWaitId,
     AtomicNotifyId,
     AtomicFenceId,
+    PauseId,
     SIMDExtractId,
     SIMDReplaceId,
     SIMDShuffleId,
@@ -706,6 +710,7 @@ public:
     TableFillId,
     TableCopyId,
     TableInitId,
+    ElemDropId,
     TryId,
     TryTableId,
     ThrowId,
@@ -718,6 +723,7 @@ public:
     CallRefId,
     RefTestId,
     RefCastId,
+    RefGetDescId,
     BrOnId,
     StructNewId,
     StructGetId,
@@ -735,6 +741,8 @@ public:
     ArrayFillId,
     ArrayInitDataId,
     ArrayInitElemId,
+    ArrayRMWId,
+    ArrayCmpxchgId,
     RefAsId,
     StringNewId,
     StringConstId,
@@ -742,12 +750,17 @@ public:
     StringEncodeId,
     StringConcatId,
     StringEqId,
+    StringTestId,
     StringWTF16GetId,
     StringSliceWTFId,
-    ContBindId,
     ContNewId,
-    ResumeId,
+    ContBindId,
     SuspendId,
+    ResumeId,
+    ResumeThrowId,
+    StackSwitchId,
+    StructWaitId,
+    StructNotifyId,
     NumExpressionIds
   };
   Id _id;
@@ -982,9 +995,11 @@ public:
   bool signed_ = false;
   Address offset;
   Address align;
-  bool isAtomic;
   Expression* ptr;
   Name memory;
+  MemoryOrder order = MemoryOrder::Unordered;
+
+  bool isAtomic() const { return order != MemoryOrder::Unordered; }
 
   // type must be set during creation, cannot be inferred
 
@@ -999,11 +1014,13 @@ public:
   uint8_t bytes;
   Address offset;
   Address align;
-  bool isAtomic;
   Expression* ptr;
   Expression* value;
   Type valueType;
   Name memory;
+  MemoryOrder order;
+
+  bool isAtomic() const { return order != MemoryOrder::Unordered; }
 
   void finalize();
 };
@@ -1019,6 +1036,7 @@ public:
   Expression* ptr;
   Expression* value;
   Name memory;
+  MemoryOrder order = MemoryOrder::SeqCst;
 
   void finalize();
 };
@@ -1034,6 +1052,7 @@ public:
   Expression* expected;
   Expression* replacement;
   Name memory;
+  MemoryOrder order = MemoryOrder::SeqCst;
 
   void finalize();
 };
@@ -1075,8 +1094,12 @@ public:
   // other orderings may be added in the future. This field is reserved for
   // that, and currently set to 0.
   uint8_t order = 0;
+};
 
-  void finalize();
+class Pause : public SpecificExpression<Expression::PauseId> {
+public:
+  Pause() = default;
+  Pause(MixedArena& allocator) {}
 };
 
 class SIMDExtract : public SpecificExpression<Expression::SIMDExtractId> {
@@ -1361,7 +1384,7 @@ public:
   Name func;
 
   void finalize();
-  void finalize(Type type_);
+  void finalize(Module& wasm);
 };
 
 class RefEq : public SpecificExpression<Expression::RefEqId> {
@@ -1459,6 +1482,16 @@ public:
   Expression* offset;
   Expression* size;
   Name table;
+
+  void finalize();
+};
+
+class ElemDrop : public SpecificExpression<Expression::ElemDropId> {
+public:
+  ElemDrop() = default;
+  ElemDrop(MixedArena& allocator) : ElemDrop() {}
+
+  Name segment;
 
   void finalize();
 };
@@ -1614,9 +1647,22 @@ public:
 
   Expression* ref;
 
+  // Used only for ref.cast_desc_eq.
+  Expression* desc;
+
   void finalize();
 
   Type& getCastType() { return type; }
+};
+
+class RefGetDesc : public SpecificExpression<Expression::RefGetDescId> {
+public:
+  RefGetDesc() = default;
+  RefGetDesc(MixedArena& allocator) {}
+
+  Expression* ref;
+
+  void finalize();
 };
 
 class BrOn : public SpecificExpression<Expression::BrOnId> {
@@ -1627,6 +1673,11 @@ public:
   BrOnOp op;
   Name name;
   Expression* ref;
+
+  // Only used for br_on_cast_desc_eq{,_fail}
+  Expression* desc;
+
+  // Only used for br_on_cast{,_desc}{,_fail}
   Type castType;
 
   void finalize();
@@ -1645,6 +1696,8 @@ public:
   // struct with no fields ambiguous, but it doesn't make a difference in that
   // case, and binaryen doesn't guarantee roundtripping binaries anyhow.
   ExpressionList operands;
+
+  Expression* desc = nullptr;
 
   bool isWithDefault() { return operands.empty(); }
 
@@ -1702,6 +1755,31 @@ public:
   Expression* expected;
   Expression* replacement;
   MemoryOrder order;
+
+  void finalize();
+};
+
+class StructWait : public SpecificExpression<Expression::StructWaitId> {
+public:
+  StructWait() = default;
+  StructWait(MixedArena& allocator) : StructWait() {}
+
+  Expression* ref;
+  Expression* expected;
+  Expression* timeout;
+  Index index;
+
+  void finalize();
+};
+
+class StructNotify : public SpecificExpression<Expression::StructNotifyId> {
+public:
+  StructNotify() = default;
+  StructNotify(MixedArena& allocator) : StructNotify() {}
+
+  Expression* ref;
+  Expression* count;
+  Index index;
 
   void finalize();
 };
@@ -1764,6 +1842,7 @@ public:
   Expression* index;
   // Packed fields have a sign.
   bool signed_ = false;
+  MemoryOrder order = MemoryOrder::Unordered;
 
   void finalize();
 };
@@ -1776,6 +1855,7 @@ public:
   Expression* ref;
   Expression* index;
   Expression* value;
+  MemoryOrder order = MemoryOrder::Unordered;
 
   void finalize();
 };
@@ -1841,6 +1921,34 @@ public:
   Expression* index;
   Expression* offset;
   Expression* size;
+
+  void finalize();
+};
+
+class ArrayRMW : public SpecificExpression<Expression::ArrayRMWId> {
+public:
+  ArrayRMW() = default;
+  ArrayRMW(MixedArena& allocator) {}
+
+  AtomicRMWOp op;
+  Expression* ref;
+  Expression* index;
+  Expression* value;
+  MemoryOrder order;
+
+  void finalize();
+};
+
+class ArrayCmpxchg : public SpecificExpression<Expression::ArrayCmpxchgId> {
+public:
+  ArrayCmpxchg() = default;
+  ArrayCmpxchg(MixedArena& allocator) {}
+
+  Expression* ref;
+  Expression* index;
+  Expression* expected;
+  Expression* replacement;
+  MemoryOrder order;
 
   void finalize();
 };
@@ -1937,6 +2045,16 @@ public:
   void finalize();
 };
 
+class StringTest : public SpecificExpression<Expression::StringTestId> {
+public:
+  StringTest() = default;
+  StringTest(MixedArena& allocator) {}
+
+  Expression* ref;
+
+  void finalize();
+};
+
 class StringWTF16Get : public SpecificExpression<Expression::StringWTF16GetId> {
 public:
   StringWTF16Get() = default;
@@ -1960,53 +2078,24 @@ public:
   void finalize();
 };
 
-class ContBind : public SpecificExpression<Expression::ContBindId> {
-public:
-  ContBind(MixedArena& allocator) : operands(allocator) {}
-
-  HeapType contTypeBefore;
-  HeapType contTypeAfter;
-  ExpressionList operands;
-  Expression* cont;
-
-  void finalize();
-};
-
 class ContNew : public SpecificExpression<Expression::ContNewId> {
 public:
   ContNew() = default;
   ContNew(MixedArena& allocator) {}
 
-  HeapType contType;
   Expression* func;
 
   void finalize();
 };
 
-class Resume : public SpecificExpression<Expression::ResumeId> {
+class ContBind : public SpecificExpression<Expression::ContBindId> {
 public:
-  Resume(MixedArena& allocator)
-    : handlerTags(allocator), handlerBlocks(allocator), operands(allocator),
-      sentTypes(allocator) {}
-
-  HeapType contType;
-  ArenaVector<Name> handlerTags;
-  ArenaVector<Name> handlerBlocks;
+  ContBind(MixedArena& allocator) : operands(allocator) {}
 
   ExpressionList operands;
   Expression* cont;
 
-  // When 'Module*' parameter is given, we populate the 'sentTypes' array, so
-  // that the types can be accessed in other analyses without accessing the
-  // module.
-  void finalize(Module* wasm = nullptr);
-
-  // sentTypes[i] contains the type of the values that will be sent to the block
-  // handlerBlocks[i] if suspending with tag handlerTags[i]. Not part of the
-  // instruction's syntax, but stored here for subsequent use.
-  // This information is cached here in order not to query the module
-  // every time we query the sent types.
-  ArenaVector<Type> sentTypes;
+  void finalize();
 };
 
 class Suspend : public SpecificExpression<Expression::SuspendId> {
@@ -2020,6 +2109,76 @@ public:
   // which determines this node's type.
   // If no module is given, then the type must have been set already.
   void finalize(Module* wasm = nullptr);
+};
+
+class Resume : public SpecificExpression<Expression::ResumeId> {
+public:
+  Resume(MixedArena& allocator)
+    : handlerTags(allocator), handlerBlocks(allocator), operands(allocator),
+      sentTypes(allocator) {}
+
+  // The following two vectors are to be understood together
+  // pointwise. That is, the ith component of each vector together
+  // classifies an on-clause `(on $tag $label)` or `(on $tag
+  // switch)`. The first vector stores reifies the `$tag` bit of the
+  // aforementioned syntax...
+  ArenaVector<Name> handlerTags;
+  // ... whilst this vector reifies the `$label` bit of the
+  // syntax. For `switch` clauses the ith component will be the Empty
+  // name (i.e. `Name()`).
+  ArenaVector<Name> handlerBlocks;
+
+  ExpressionList operands;
+  Expression* cont;
+
+  void finalize();
+
+  // sentTypes[i] contains the type of the values that will be sent to the block
+  // handlerBlocks[i] if suspending with tag handlerTags[i]. Not part of the
+  // instruction's syntax, but stored here for subsequent use.
+  // This information is cached here in order not to query the module
+  // every time we query the sent types.
+  ArenaVector<Type> sentTypes;
+};
+
+class ResumeThrow : public SpecificExpression<Expression::ResumeThrowId> {
+public:
+  ResumeThrow(MixedArena& allocator)
+    : handlerTags(allocator), handlerBlocks(allocator), operands(allocator),
+      sentTypes(allocator) {}
+
+  // If tag is set to a non-null Name, this is a resume_throw and |operands|
+  // contains the values to be set in an exception of that tag. If tag is null,
+  // this is resume_throw_ref and |operands| contains a single item, the exnref.
+  Name tag;
+  // See the comment on `Resume` above.
+  ArenaVector<Name> handlerTags;
+  ArenaVector<Name> handlerBlocks;
+
+  ExpressionList operands;
+  Expression* cont;
+
+  void finalize();
+
+  // sentTypes[i] contains the type of the values that will be sent to the block
+  // handlerBlocks[i] if suspending with tag handlerTags[i]. Not part of the
+  // instruction's syntax, but stored here for subsequent use.
+  // This information is cached here in order not to query the module
+  // every time we query the sent types.
+  ArenaVector<Type> sentTypes;
+};
+
+class StackSwitch : public SpecificExpression<Expression::StackSwitchId> {
+public:
+  StackSwitch(MixedArena& allocator) : operands(allocator) {}
+
+  Name tag;
+
+  ExpressionList operands;
+  Expression* cont;
+
+  // We need access to the module to obtain the signature of the tag.
+  void finalize();
 };
 
 // Globals
@@ -2046,6 +2205,7 @@ struct Importable : Named {
   Name module, base;
 
   bool imported() const { return module.is(); }
+  ImportNames importNames() const { return ImportNames{module, base}; };
 };
 
 class Function;
@@ -2096,9 +2256,73 @@ struct BinaryLocations {
   std::unordered_map<Function*, FunctionLocations> functions;
 };
 
+// Forward declaration for FuncEffectsMap.
+class EffectAnalyzer;
+
+// Annotation for a particular piece of code. This includes std::optionals for
+// all possible annotations, with the ones present being filled in (or just a
+// bool for an annotation with one possible value).
+struct CodeAnnotation {
+  // Branch Hinting proposal: Whether the branch is likely, or unlikely.
+  std::optional<bool> branchLikely;
+
+  // Compilation Hints proposal.
+  static const uint8_t NeverInline = 0;
+  static const uint8_t AlwaysInline = 127;
+  std::optional<uint8_t> inline_;
+
+  // Toolchain hints, see
+  // https://github.com/WebAssembly/binaryen/wiki/Optimizer-Cookbook#intrinsics
+
+  // If this expression's result is unused, then the entire thing can be
+  // considered dead and removable.
+  bool removableIfUnused = false;
+
+  // This should be assumed to be called from JS, even in closed world. Being
+  // called from JS means that the call happens in a non-typed way, with only
+  // the signature mattering ("signature-called"). In particular, rec group type
+  // identity does not matter for such functions.
+  bool jsCalled = false;
+
+  // A function that may do something on the first call, but all subsequent
+  // calls with the same parameters can be assumed to have no effects. If a
+  // value is returned, it will be the same value as returned earlier (for the
+  // same parameters).
+  //
+  // Note that this differs from related concepts in C,
+  // https://en.cppreference.com/w/c/language/attributes/reproducible.html#Idempotent
+  // There, idempotency is considered compared to the state of the program,
+  // which means that two idempotent calls with some effect in between cannot be
+  // optimized. Here, we do optimize such situations - the only state we care
+  // about is what is passed in via parameters. This allows us to better
+  // optimize things like Java class constructors.
+  bool idempotent = false;
+
+  bool operator==(const CodeAnnotation& other) const {
+    return equalOnSemanticsPreserving(other) && equalOnSemanticsAltering(other);
+  }
+
+  // Compares only true hints, that preserve semantics and do not change
+  // behavior in the optimizer.
+  bool equalOnSemanticsPreserving(const CodeAnnotation& other) const {
+    return branchLikely == other.branchLikely && inline_ == other.inline_;
+  }
+
+  // Compares annotations that *do* alter semantics.
+  bool equalOnSemanticsAltering(const CodeAnnotation& other) const {
+    return removableIfUnused == other.removableIfUnused &&
+           jsCalled == other.jsCalled && idempotent == other.idempotent;
+  }
+
+  // Checks if no annotation is actually set.
+  bool empty() { return *this == CodeAnnotation(); }
+};
+
 class Function : public Importable {
 public:
-  HeapType type = HeapType(Signature()); // parameters and return value
+  // A non-nullable reference to a function type. Exact for defined functions.
+  // TODO: Inexact for imported functions.
+  Type type = Type(Signature(), NonNullable, Exact);
   IRProfile profile = IRProfile::Normal;
   std::vector<Type> vars; // non-param locals
 
@@ -2112,7 +2336,7 @@ public:
   // Source maps debugging info: map expression nodes to their file, line, col,
   // symbol name.
   struct DebugLocation {
-    BinaryLocation fileIndex, lineNumber, columnNumber;
+    BinaryLocation fileIndex = -1, lineNumber = -1, columnNumber = -1;
     std::optional<BinaryLocation> symbolNameIndex;
     bool operator==(const DebugLocation& other) const {
       return fileIndex == other.fileIndex && lineNumber == other.lineNumber &&
@@ -2129,6 +2353,11 @@ public:
                ? columnNumber < other.columnNumber
                : symbolNameIndex < other.symbolNameIndex;
     }
+    void dump() const {
+      std::cerr << (symbolNameIndex ? symbolNameIndex.value() : -1) << " @ "
+                << fileIndex << ":" << lineNumber << ":" << columnNumber
+                << "\n";
+    }
   };
   // One can explicitly set the debug location of an expression to
   // nullopt to stop the propagation of debug locations.
@@ -2142,17 +2371,40 @@ public:
     delimiterLocations;
   BinaryLocations::FunctionLocations funcLocation;
 
-  // Inlining metadata: whether to disallow full and/or partial inlining (for
-  // details on what those mean, see Inlining.cpp).
+  // Annotations on expressions. As with debug info, we do not store these on
+  // Expressions as we assume most instances are unannotated, and do not want to
+  // add constant memory overhead.
+  std::unordered_map<Expression*, CodeAnnotation> codeAnnotations;
+  // Annotations on the function itself. These could be stored in the above map
+  // with a key of nullptr (matching the binary format), but it is safer to
+  // keep them separate: in theory a parallel pass could modify code annotations
+  // by, say, duplicating code and adding new ones, which modifies the map,
+  // while another thread might query that function, for whom it has a call,
+  // about the function-level annotations.
+  CodeAnnotation funcAnnotations;
+
+  // The effects for this function, if they have been computed. We use a shared
+  // ptr here to avoid compilation errors with the forward-declared
+  // EffectAnalyzer.
+  //
+  // See addsEffects() in pass.h for more details.
+  std::shared_ptr<EffectAnalyzer> effects;
+
+  // Inlining metadata: whether to disallow full and/or partial inlining. This
+  // is a toolchain-level hint. For more details, see Inlining.cpp.
   bool noFullInline = false;
   bool noPartialInline = false;
 
   // Methods
-  Signature getSig() { return type.getSignature(); }
+  Signature getSig() { return type.getHeapType().getSignature(); }
   Type getParams() { return getSig().params; }
   Type getResults() { return getSig().results; }
-  void setParams(Type params) { type = Signature(params, getResults()); }
-  void setResults(Type results) { type = Signature(getParams(), results); }
+  void setParams(Type params) {
+    type = type.with(Signature(params, getResults()));
+  }
+  void setResults(Type results) {
+    type = type.with(Signature(getParams(), results));
+  }
 
   size_t getNumParams();
   size_t getNumVars();
@@ -2177,15 +2429,20 @@ public:
   void clearDebugInfo();
 };
 
-// The kind of an import or export.
-enum class ExternalKind {
+// The kind of an import or export. Use a namespace to avoid polluting the wasm
+// namespace while maintaining implicit conversion to int, which an enum class
+// would not have.
+namespace ExternalKindImpl {
+enum Kind : uint32_t {
   Function = 0,
   Table = 1,
   Memory = 2,
   Global = 3,
   Tag = 4,
-  Invalid = -1
+  Invalid = uint32_t(-1)
 };
+} // namespace ExternalKindImpl
+using ExternalKind = ExternalKindImpl::Kind;
 
 // The kind of a top-level module item. (This overlaps with ExternalKind, but
 // C++ has no good way to extend an enum.) All such items are referred to by
@@ -2204,11 +2461,25 @@ enum class ModuleItemKind {
 
 class Export {
 public:
-  // exported name - note that this is the key, as the internal name is
-  // non-unique (can have multiple exports for an internal, also over kinds)
+  // exported name - note that this is the key, as the internal name,
+  // or the exported type, is non-unique (can have multiple exports for an
+  // internal, also over kinds)
   Name name;
-  Name value; // internal name
   ExternalKind kind;
+
+private:
+  std::variant<Name, HeapType> value; // internal name or exported type
+
+public:
+  Export(Name name, ExternalKind kind, std::variant<Name, HeapType> value)
+    : name(name), kind(kind), value(value) {
+    assert(std::get_if<Name>(&value));
+  }
+  Name* getInternalName() { return std::get_if<Name>(&value); }
+  void setInternalName(Name name) {
+    assert(std::holds_alternative<Name>(value));
+    value = name;
+  }
 };
 
 class ElementSegment : public Named {
@@ -2299,8 +2570,8 @@ class Tag : public Importable {
 public:
   HeapType type;
 
-  Type params() { return type.getSignature().params; }
-  Type results() { return type.getSignature().results; }
+  Type params() const { return type.getSignature().params; }
+  Type results() const { return type.getSignature().results; }
 };
 
 // "Opaque" data, not part of the core wasm spec, that is held in binaries.
@@ -2340,9 +2611,15 @@ public:
   // Optional user section IR representation.
   std::unique_ptr<DylinkSection> dylinkSection;
 
-  // Source maps debug info.
+  // Source maps debug info. All of these fields are read directly in from the
+  // source map and are encoded as in the original JSON (UTF-8 encoded with
+  // with escaped quotes and slashes). The string values are uninterpreted in
+  // Binaryen, and they are written directly back out without re-encoding.
   std::vector<std::string> debugInfoFileNames;
   std::vector<std::string> debugInfoSymbolNames;
+  std::string debugInfoSourceRoot;
+  std::string debugInfoFile;
+  std::vector<std::string> debugInfoSourcesContent;
 
   // `features` are the features allowed to be used in this module and should be
   // respected regardless of the value of`hasFeaturesSection`.
@@ -2444,8 +2721,9 @@ public:
 // Utility for printing an expression with named types.
 using ModuleExpression = std::pair<Module&, Expression*>;
 
-// Utility for printing an type with a name, if the module defines a name.
+// Utilities for printing an type with a name, if the module defines a name.
 using ModuleType = std::pair<Module&, Type>;
+using ModuleHeapType = std::pair<Module&, HeapType>;
 
 // Utility for printing only the top level of an expression. Named types will be
 // used if `module` is non-null.
@@ -2453,6 +2731,17 @@ struct ShallowExpression {
   Expression* expr;
   Module* module = nullptr;
 };
+
+std::ostream& operator<<(std::ostream& o, wasm::Module& module);
+std::ostream& operator<<(std::ostream& o, wasm::Function& func);
+std::ostream& operator<<(std::ostream& o, wasm::Expression& expression);
+std::ostream& operator<<(std::ostream& o, wasm::ModuleExpression pair);
+std::ostream& operator<<(std::ostream& o, wasm::ShallowExpression expression);
+std::ostream& operator<<(std::ostream& o, wasm::ModuleType pair);
+std::ostream& operator<<(std::ostream& o, wasm::ModuleHeapType pair);
+std::ostream& operator<<(std::ostream& os, wasm::MemoryOrder mo);
+std::ostream& operator<<(std::ostream& o, const wasm::ImportNames& importNames);
+std::ostream& operator<<(std::ostream& o, const Table& table);
 
 } // namespace wasm
 
@@ -2462,13 +2751,6 @@ template<> struct hash<wasm::Address> {
     return std::hash<wasm::Address::address64_t>()(a.addr);
   }
 };
-
-std::ostream& operator<<(std::ostream& o, wasm::Module& module);
-std::ostream& operator<<(std::ostream& o, wasm::Function& func);
-std::ostream& operator<<(std::ostream& o, wasm::Expression& expression);
-std::ostream& operator<<(std::ostream& o, wasm::ModuleExpression pair);
-std::ostream& operator<<(std::ostream& o, wasm::ShallowExpression expression);
-std::ostream& operator<<(std::ostream& o, wasm::ModuleType pair);
 
 } // namespace std
 

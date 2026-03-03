@@ -25,6 +25,7 @@ namespace {
 enum Comparison { EQ, LT, GT };
 
 template<typename CompareTypes> struct RecGroupComparator {
+  FeatureSet features;
   std::unordered_map<HeapType, Index> indicesA;
   std::unordered_map<HeapType, Index> indicesB;
   CompareTypes compareTypes;
@@ -32,6 +33,8 @@ template<typename CompareTypes> struct RecGroupComparator {
   RecGroupComparator(CompareTypes compareTypes) : compareTypes(compareTypes) {}
 
   Comparison compare(const RecGroupShape& a, const RecGroupShape& b) {
+    assert(a.features == b.features);
+    features = a.features;
     if (a.types.size() != b.types.size()) {
       return a.types.size() < b.types.size() ? LT : GT;
     }
@@ -61,15 +64,17 @@ template<typename CompareTypes> struct RecGroupComparator {
     if (a.isOpen() != b.isOpen()) {
       return a.isOpen() < b.isOpen() ? LT : GT;
     }
-    auto aSuper = a.getDeclaredSuperType();
-    auto bSuper = b.getDeclaredSuperType();
-    if (aSuper.has_value() != bSuper.has_value()) {
-      return aSuper.has_value() < bSuper.has_value() ? LT : GT;
+    if (auto cmp = compare(a.getDeclaredSuperType(), b.getDeclaredSuperType());
+        cmp != EQ) {
+      return cmp;
     }
-    if (aSuper) {
-      if (auto cmp = compare(*aSuper, *bSuper); cmp != EQ) {
-        return cmp;
-      }
+    if (auto cmp = compare(a.getDescriptorType(), b.getDescriptorType());
+        cmp != EQ) {
+      return cmp;
+    }
+    if (auto cmp = compare(a.getDescribedType(), b.getDescribedType());
+        cmp != EQ) {
+      return cmp;
     }
     auto aKind = a.getKind();
     auto bKind = b.getKind();
@@ -84,6 +89,7 @@ template<typename CompareTypes> struct RecGroupComparator {
       case HeapTypeKind::Array:
         return compare(a.getArray(), b.getArray());
       case HeapTypeKind::Cont:
+        assert(a.isContinuation() && b.isContinuation());
         return compare(a.getContinuation(), b.getContinuation());
       case HeapTypeKind::Basic:
         break;
@@ -130,6 +136,10 @@ template<typename CompareTypes> struct RecGroupComparator {
   }
 
   Comparison compare(Type a, Type b) {
+    // Compare types as they will eventually be written out, not as they are in
+    // the IR.
+    a = a.asWrittenGivenFeatures(features);
+    b = b.asWrittenGivenFeatures(features);
     if (a.isBasic() != b.isBasic()) {
       return b.isBasic() < a.isBasic() ? LT : GT;
     }
@@ -148,6 +158,9 @@ template<typename CompareTypes> struct RecGroupComparator {
     assert(a.isRef() && b.isRef());
     if (a.isNullable() != b.isNullable()) {
       return a.isNullable() < b.isNullable() ? LT : GT;
+    }
+    if (a.isExact() != b.isExact()) {
+      return a.isExact() < b.isExact() ? LT : GT;
     }
     return compare(a.getHeapType(), b.getHeapType());
   }
@@ -193,6 +206,16 @@ template<typename CompareTypes> struct RecGroupComparator {
     // comparator.
     return compareTypes(a, b);
   }
+
+  Comparison compare(std::optional<HeapType> a, std::optional<HeapType> b) {
+    if (a.has_value() != b.has_value()) {
+      return a.has_value() < b.has_value() ? LT : GT;
+    }
+    if (a) {
+      return compare(*a, *b);
+    }
+    return EQ;
+  }
 };
 
 // Deduction guide to satisfy -Wctad-maybe-unsupported.
@@ -200,9 +223,11 @@ template<typename CompareTypes>
 RecGroupComparator(CompareTypes) -> RecGroupComparator<CompareTypes>;
 
 struct RecGroupHasher {
+  FeatureSet features;
   std::unordered_map<HeapType, Index> typeIndices;
 
   size_t hash(const RecGroupShape& shape) {
+    features = shape.features;
     for (auto type : shape.types) {
       typeIndices.insert({type, typeIndices.size()});
     }
@@ -216,11 +241,9 @@ struct RecGroupHasher {
   size_t hashDefinition(HeapType type) {
     size_t digest = wasm::hash(type.isShared());
     wasm::rehash(digest, type.isOpen());
-    auto super = type.getDeclaredSuperType();
-    wasm::rehash(digest, super.has_value());
-    if (super) {
-      hash_combine(digest, hash(*super));
-    }
+    hash_combine(digest, hash(type.getDeclaredSuperType()));
+    hash_combine(digest, hash(type.getDescriptorType()));
+    hash_combine(digest, hash(type.getDescribedType()));
     auto kind = type.getKind();
     // Mix in very random numbers to differentiate the kinds.
     switch (kind) {
@@ -237,6 +260,7 @@ struct RecGroupHasher {
         hash_combine(digest, hash(type.getArray()));
         return digest;
       case HeapTypeKind::Cont:
+        assert(type.isContinuation());
         wasm::rehash(digest, 2381496927);
         hash_combine(digest, hash(type.getContinuation()));
         return digest;
@@ -272,6 +296,9 @@ struct RecGroupHasher {
   }
 
   size_t hash(Type type) {
+    // Hash types as they will eventually be written out, not as they are in the
+    // IR.
+    type = type.asWrittenGivenFeatures(features);
     size_t digest = wasm::hash(type.isBasic());
     if (type.isBasic()) {
       wasm::rehash(digest, type.getBasic());
@@ -284,6 +311,7 @@ struct RecGroupHasher {
     }
     assert(type.isRef());
     wasm::rehash(digest, type.isNullable());
+    wasm::rehash(digest, type.isExact());
     hash_combine(digest, hash(type.getHeapType()));
     return digest;
   }
@@ -311,6 +339,14 @@ struct RecGroupHasher {
     wasm::rehash(digest, type.getID());
     return digest;
   }
+
+  size_t hash(std::optional<HeapType> type) {
+    size_t digest = wasm::hash(type.has_value());
+    if (type) {
+      hash_combine(digest, hash(*type));
+    }
+    return digest;
+  }
 };
 
 Comparison compareComparable(const ComparableRecGroupShape& a,
@@ -335,6 +371,53 @@ bool ComparableRecGroupShape::operator<(const RecGroupShape& other) const {
 
 bool ComparableRecGroupShape::operator>(const RecGroupShape& other) const {
   return GT == compareComparable(*this, other);
+}
+
+RecGroup UniqueRecGroups::insert(RecGroup group) {
+  auto typesIt = groups.emplace(groups.end(), group.begin(), group.end());
+  auto& types = *typesIt;
+  if (shapes.emplace(RecGroupShape(types, features), group).second) {
+    // The types are already unique.
+    return group;
+  }
+  // There is a conflict. Find a brand that makes the group unique.
+  BrandTypeIterator brand;
+  types.push_back(*brand);
+  Index size = types.size();
+  do {
+    types.back() = *brand;
+    ++brand;
+    TypeBuilder builder(size);
+    // Map the old types (excluding the brand) to their corresponding new types
+    // to preserve recursions within the group.
+    std::unordered_map<HeapType, HeapType> newTypes;
+    for (Index i = 0; i < size - 1; ++i) {
+      newTypes[group[i]] = builder[i];
+    }
+    for (Index i = 0; i < size; ++i) {
+      builder[i].copy(types[i], [&](HeapType type) {
+        if (auto newType = newTypes.find(type); newType != newTypes.end()) {
+          return newType->second;
+        }
+        return type;
+      });
+    }
+    builder.createRecGroup(0, size);
+    types = *builder.build();
+    group = types[0].getRecGroup();
+  } while (!shapes.emplace(RecGroupShape(types, features), group).second);
+
+  return group;
+}
+
+RecGroup UniqueRecGroups::insertOrGet(RecGroup group) {
+  auto typesIt = groups.emplace(groups.end(), group.begin(), group.end());
+  auto [it, inserted] =
+    shapes.emplace(RecGroupShape(*typesIt, features), group);
+  if (!inserted) {
+    groups.erase(typesIt);
+  }
+  return it->second;
 }
 
 } // namespace wasm

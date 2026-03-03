@@ -14,13 +14,10 @@
 
 import os
 
-
 # Tests that the fuzzers should not operate on.
 unfuzzable = [
     # Float16 is still experimental.
     'f16.wast',
-    # not all relaxed SIMD instructions are implemented in the interpreter
-    'relaxed-simd.wast',
     # TODO: fuzzer and interpreter support for strings
     'strings.wast',
     'simplify-locals-strings.wast',
@@ -72,24 +69,60 @@ unfuzzable = [
     # the fuzzer does not support imported memories
     'multi-memory-lowering-import.wast',
     'multi-memory-lowering-import-error.wast',
-    # the fuzzer does not support typed continuations
-    'typed_continuations.wast',
-    'typed_continuations_resume.wast',
-    'typed_continuations_contnew.wast',
-    'typed_continuations_contbind.wast',
-    'typed_continuations_suspend.wast',
     # the fuzzer does not support struct RMW ops
     'gc-atomics.wast',
     'gc-atomics-null-refs.wast',
     'shared-structs.wast',
     'heap2local-rmw.wast',
     'optimize-instructions-struct-rmw.wast',
+    'gto-removals-rmw.wast',
+    'type-refining-rmw.wast',
+    'type-ssa-exact-rmw.wast',
+    'cfp-rmw.wast',
     # contains too many segments to run in a wasm VM
     'limit-segments_disable-bulk-memory.wast',
     # https://github.com/WebAssembly/binaryen/issues/7176
     'names.wast',
     # huge amount of locals that make it extremely slow
     'too_much_for_liveness.wasm',
+    # has (ref extern) imports, which the fuzzer cannot create values for when
+    # it removes unknown imports
+    'string-lifting.wast',
+    'string-lifting-custom-module.wast',
+    # TODO: fuzzer support for remaining stack switching instructions: switch,
+    #       cont.bind
+    'cont.wast',
+    'precompute-stack-switching.wast',
+    'coalesce-locals-stack-switching.wast',
+    'stack_switching_switch_2.wast',
+    'stack_switching_switch.wast',
+    'unsubtyping-stack-switching.wast',
+    # TODO: fix split_wast() on tricky escaping situations like a string ending
+    #       in \\" (the " is not escaped - there is an escaped \ before it)
+    'string-lifting-section.wast',
+    # TODO: fuzzer support for uninhabitable imported globals
+    'exact-references.wast',
+    # We do not have full suppor for these imports in all parts of the fuzzer.
+    'instrument-branch-hints.wast',
+    # Contains a subtype chain that exceeds depth limits.
+    'reorder-types-real.wast',
+    # Contains a name with "__fuzz_split", indicating it is emitted by
+    # wasm-split, confusing the fuzzer because it is in the initial content.
+    'fuzz_shell_second.wast',
+    # We cannot fuzz semantics-altering intrinsics, as when we optimize the
+    # behavior changes.
+    'removable-if-unused.wast',
+    'removable-if-unused-func.wast',
+    'vacuum-removable-if-unused.wast',
+    'vacuum-removable-if-unused-func.wast',
+    'strip-toolchain-annotations-func.wast',
+    'idempotent.wast',
+    'optimize-instructions_idempotent.wast',
+    'duplicate-function-elimination_annotations.wast',
+    'once-reduction_idempotent.wast',
+    'local-cse_idempotent.wast',
+    # Not fully implemented.
+    'waitqueue.wast',
 ]
 
 

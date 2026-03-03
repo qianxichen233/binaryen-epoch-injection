@@ -105,6 +105,7 @@ void PassRegistry::registerPasses() {
                "removes arguments to calls in an lto-like manner, and "
                "optimizes where we removed",
                createDAEOptimizingPass);
+  registerPass("dae2", "Experimental reimplementation of DAE", createDAE2Pass);
   registerPass("abstract-type-refining",
                "refine and merge abstract (never-created) types",
                createAbstractTypeRefiningPass);
@@ -193,6 +194,10 @@ void PassRegistry::registerPasses() {
   registerPass(
     "gsi", "globally optimize struct values", createGlobalStructInferencePass);
   registerPass(
+    "gsi-desc-cast",
+    "globally optimize struct values, also emitting ref.cast_desc_eq",
+    createGlobalStructInferenceDescCastPass);
+  registerPass(
     "gto", "globally optimize GC types", createGlobalTypeOptimizationPass);
   registerPass("gufa",
                "Grand Unified Flow Analysis: optimize the entire program using "
@@ -214,6 +219,10 @@ void PassRegistry::registerPasses() {
   registerPass("type-refining",
                "apply more specific subtypes to type fields where possible",
                createTypeRefiningPass);
+  registerPass("type-refining-gufa",
+               "apply more specific subtypes to type fields where possible "
+               "(using GUFA)",
+               createTypeRefiningGUFAPass);
   registerPass(
     "heap2local", "replace GC allocations with locals", createHeap2LocalPass);
   registerPass("heap-store-optimization",
@@ -230,9 +239,6 @@ void PassRegistry::registerPasses() {
   registerPass("intrinsic-lowering",
                "lower away binaryen intrinsics",
                createIntrinsicLoweringPass);
-  registerPass("jspi",
-               "wrap imports and exports for JavaScript promise integration",
-               createJSPIPass);
   registerPass("legalize-js-interface",
                "legalizes i64 types on the import/export boundary",
                createLegalizeJSInterfacePass);
@@ -258,6 +264,9 @@ void PassRegistry::registerPasses() {
     "trace-calls",
     "instrument the build with code to intercept specific function calls",
     createTraceCallsPass);
+  registerPass("instrument-branch-hints",
+               "instrument branch hints so we can see which guessed right",
+               createInstrumentBranchHintsPass);
   registerPass(
     "instrument-locals",
     "instrument the build with code to intercept all loads and stores",
@@ -310,13 +319,6 @@ void PassRegistry::registerPasses() {
   registerPass("minimize-rec-groups",
                "Split types into minimal recursion groups",
                createMinimizeRecGroupsPass);
-  registerPass("mod-asyncify-always-and-only-unwind",
-               "apply the assumption that asyncify imports always unwind, "
-               "and we never rewind",
-               createModAsyncifyAlwaysOnlyUnwindPass);
-  registerPass("mod-asyncify-never-unwind",
-               "apply the assumption that asyncify never unwinds",
-               createModAsyncifyNeverUnwindPass);
   registerPass("monomorphize",
                "creates specialized versions of functions",
                createMonomorphizePass);
@@ -401,7 +403,6 @@ void PassRegistry::registerPasses() {
   // Also register it as "symbolmap" so that  wasm-opt --symbolmap=foo  is the
   // same as  wasm-as --symbolmap=foo  even though the latter is not a pass
   // (wasm-as cannot run arbitrary passes).
-  // TODO: switch emscripten to this name, then remove the old one
   registerPass(
     "symbolmap", "(alias for print-function-map)", createPrintFunctionMapPass);
 
@@ -411,6 +412,9 @@ void PassRegistry::registerPasses() {
   registerPass("remove-non-js-ops",
                "removes operations incompatible with js",
                createRemoveNonJSOpsPass);
+  registerPass("remove-relaxed-simd",
+               "replaces relaxed SIMD instructions with unreachable",
+               createRemoveRelaxedSIMDPass);
   registerPass("remove-imports",
                "removes imports and replaces them with nops",
                createRemoveImportsPass);
@@ -444,12 +448,12 @@ void PassRegistry::registerPasses() {
   registerPass("reorder-globals",
                "sorts globals by access frequency",
                createReorderGlobalsPass);
-  registerTestPass("reorder-globals-always",
-                   "sorts globals by access frequency (even if there are few)",
-                   createReorderGlobalsAlwaysPass);
   registerPass("reorder-locals",
                "sorts locals by access frequency",
                createReorderLocalsPass);
+  registerPass("reorder-types",
+               "sorts private types by access frequency",
+               createReorderTypesPass);
   registerPass("rereloop",
                "re-optimize control flow using the relooper algorithm",
                createReReloopPass);
@@ -521,6 +525,9 @@ void PassRegistry::registerPasses() {
   registerPass("string-gathering",
                "gathers wasm strings to globals",
                createStringGatheringPass);
+  registerPass("string-lifting",
+               "lift string imports to wasm strings",
+               createStringLiftingPass);
   registerPass("string-lowering",
                "lowers wasm strings and operations to imports",
                createStringLoweringPass);
@@ -548,6 +555,9 @@ void PassRegistry::registerPasses() {
   registerPass("strip-target-features",
                "strip the wasm target features section",
                createStripTargetFeaturesPass);
+  registerPass("strip-toolchain-annotations",
+               "strip all toolchain-specific code annotations",
+               createStripToolchainAnnotationsPass);
   registerPass("translate-to-new-eh",
                "deprecated; same as translate-to-exnref",
                createTranslateToExnrefPass);
@@ -570,7 +580,7 @@ void PassRegistry::registerPasses() {
                "merge types to their supertypes where possible",
                createTypeMergingPass);
   registerPass("type-ssa",
-               "create new nominal types to help other optimizations",
+               "create new types to help other optimizations",
                createTypeSSAPass);
   registerPass("type-unfinalizing",
                "mark all types as non-final (open)",
@@ -589,9 +599,25 @@ void PassRegistry::registerPasses() {
   registerTestPass("catch-pop-fixup",
                    "fixup nested pops within catches",
                    createCatchPopFixupPass);
+  registerTestPass("deinstrument-branch-hints",
+                   "de-instrument branch hint instrumentation",
+                   createDeInstrumentBranchHintsPass);
+  registerTestPass("delete-branch-hints",
+                   "delete branch hints using a list of instrumented IDs",
+                   createDeleteBranchHintsPass);
   registerTestPass("experimental-type-generalizing",
                    "generalize types (not yet sound)",
                    createTypeGeneralizingPass);
+  registerTestPass("randomize-branch-hints",
+                   "randomize branch hints (for fuzzing)",
+                   createRandomizeBranchHintsPass);
+  registerTestPass("reorder-globals-always",
+                   "sorts globals by access frequency (even if there are few)",
+                   createReorderGlobalsAlwaysPass);
+  registerTestPass(
+    "reorder-types-for-testing",
+    "sorts types by access frequency with an exaggerated cost function",
+    createReorderTypesForTestingPass);
 }
 
 void PassRunner::addIfNoDWARFIssues(std::string passName) {
@@ -748,9 +774,17 @@ void PassRunner::addDefaultGlobalOptimizationPrePasses() {
     addIfNoDWARFIssues("remove-unused-module-elements");
     if (options.closedWorld) {
       addIfNoDWARFIssues("remove-unused-types");
-      addIfNoDWARFIssues("cfp");
-      addIfNoDWARFIssues("gsi");
+      // Allow ref.tests in cfp if we are aggressively optimizing for speed.
+      if (options.optimizeLevel >= 3) {
+        addIfNoDWARFIssues("cfp-reftest");
+      } else {
+        addIfNoDWARFIssues("cfp");
+      }
+    }
+    addIfNoDWARFIssues("gsi");
+    if (options.closedWorld) {
       addIfNoDWARFIssues("abstract-type-refining");
+      addIfNoDWARFIssues("unsubtyping");
     }
   }
   // TODO: generate-global-effects here, right before function passes, then
@@ -844,9 +878,11 @@ void PassRunner::run() {
     for (auto& pass : passes) {
       // ignoring the time, save a printout of the module before, in case this
       // pass breaks it, so we can print the before and after
-      std::stringstream moduleBefore;
+      std::string moduleBefore;
       if (passDebug == 2 && !isNested) {
-        moduleBefore << *wasm << '\n';
+        std::stringstream ss;
+        ss << *wasm << '\n';
+        moduleBefore = ss.str();
       }
       // prepare to run
       std::cerr << "[PassRunner]   running pass: " << pass->name << "... ";
@@ -873,7 +909,7 @@ void PassRunner::run() {
           if (passDebug >= 2) {
             Fatal() << "Last pass (" << pass->name
                     << ") broke validation. Here is the module before: \n"
-                    << moduleBefore.str() << "\n";
+                    << moduleBefore << "\n";
           } else {
             Fatal() << "Last pass (" << pass->name
                     << ") broke validation. Run with BINARYEN_PASS_DEBUG=2 "
@@ -1003,9 +1039,12 @@ void PassRunner::runPassOnFunction(Pass* pass, Function* func) {
   // useful - leave it to the entire module to fail validation in that case.
   bool extraFunctionValidation =
     passDebug == 2 && options.validate && !pass->name.empty();
-  std::stringstream bodyBefore;
+
+  std::string bodyBefore;
   if (extraFunctionValidation) {
-    bodyBefore << *func->body << '\n';
+    std::stringstream ss;
+    ss << *func->body << '\n';
+    bodyBefore = ss.str();
   }
 
   // Function-parallel passes get a new instance per function
@@ -1019,7 +1058,7 @@ void PassRunner::runPassOnFunction(Pass* pass, Function* func) {
       Fatal() << "Last nested function-parallel pass (" << pass->name
               << ") broke validation of function " << func->name
               << ". Here is the function body before:\n"
-              << bodyBefore.str() << "\n\nAnd here it is now:\n"
+              << bodyBefore << "\n\nAnd here it is now:\n"
               << *func->body << '\n';
     }
   }
@@ -1047,9 +1086,9 @@ void PassRunner::handleAfterEffects(Pass* pass, Function* func) {
     TypeUpdating::handleNonDefaultableLocals(func, *wasm);
   }
 
-  if (options.funcEffectsMap && pass->addsEffects()) {
+  if (pass->addsEffects()) {
     // Effects were added, so discard any computed effects for this function.
-    options.funcEffectsMap->erase(func->name);
+    func->effects.reset();
   }
 }
 

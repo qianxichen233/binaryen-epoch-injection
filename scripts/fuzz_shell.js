@@ -47,9 +47,24 @@ if (!binary) {
 // passed a final parameter in the form of "exports:X,Y,Z" then we call
 // specifically the exports X, Y, and Z.
 var exportsToCall;
-if (argv.length > 0 && argv[argv.length - 1].startsWith('exports:')) {
-  exportsToCall = argv[argv.length - 1].substr('exports:'.length).split(',');
-  argv.pop();
+
+// Passing --fuzz-split makes us treat the two input files as split off
+// from a single one, and we will run them as that single file (ignoring extra
+// exports from the second one, and from wasm-split itself). This allows us to
+// get the same behavior from split modules as before the split.
+var fuzzSplit = false;
+
+for (var i = 0; i < argv.length; i++) {
+  var curr = argv[i];
+  if (curr.startsWith('exports:')) {
+    exportsToCall = curr.substr('exports:'.length).split(',');
+    argv.splice(i, 1);
+    i--;
+  } else if (curr == '--fuzz-split') {
+    fuzzSplit = true;
+    argv.splice(i, 1);
+    i--;
+  }
 }
 
 // If a second parameter is given, it is a second binary that we will link in
@@ -148,6 +163,19 @@ function logValue(x, y) {
   console.log('[LoggingExternalInterface logging ' + printed(x, y) + ']');
 }
 
+function logRef(ref) {
+  // Look for VM bugs by using the reference in an API (note: we cannot do
+  // +ref or ref+'' as those trap).
+  JSON.stringify(ref);
+  // If not null, try to read a property, which might exercise an
+  // interesting code path.
+  if (ref) {
+    ref.foobar;
+  }
+  // Finally, log normally as with all other loggers.
+  logValue(ref);
+}
+
 // Track the exports in a map (similar to the Exports object from wasm, i.e.,
 // whose keys are strings and whose values are the corresponding exports).
 var exports = {};
@@ -170,14 +198,19 @@ function callFunc(func) {
   return func.apply(null, args);
 }
 
-// Calls a given function in a try-catch, swallowing JS exceptions, and return 1
-// if we did in fact swallow an exception. Wasm traps are not swallowed (see
-// details below).
-/* async */ function tryCall(func) {
+// Calls a given function in a try-catch. Return 1 if an exception was thrown.
+// If |rethrow| is set, and an exception is thrown, it is caught and rethrown.
+// Wasm traps are not swallowed (see details below).
+/* async */ function tryCall(func, rethrow) {
   try {
     /* await */ func();
     return 0;
   } catch (e) {
+    // The exception might be a JS null, but otherwise it must be valid to check
+    // if a property exists on it (VM bugs could cause errors here, specifically
+    // if a wasm exception is caught here, and it is not represented properly).
+    if (e !== null) e.a;
+
     // We only want to catch exceptions, not wasm traps: traps should still
     // halt execution. Handling this requires different code in wasm2js, so
     // check for that first (wasm2js does not define RuntimeError, so use
@@ -208,7 +241,11 @@ function callFunc(func) {
       }
     }
     // Otherwise, this is a normal exception we want to catch (a wasm
-    // exception, or a conversion error on the wasm/JS boundary, etc.).
+    // exception, or a conversion error on the wasm/JS boundary, etc.). Rethrow
+    // if we were asked to.
+    if (rethrow) {
+      throw e;
+    }
     return 1;
   }
 }
@@ -222,6 +259,34 @@ function toAddressType(table, index) {
     return BigInt(index);
   }
   return index;
+}
+
+// Simple deterministic hashing, on an unsigned 32-bit seed. See e.g.
+// https://www.boost.org/doc/libs/1_55_0/doc/html/hash/reference.html#boost.hash_combine
+var hashSeed;
+
+function hasHashSeed() {
+  return hashSeed !== undefined;
+}
+
+function hashCombine(value) {
+  // hashSeed must be set before we do anything.
+  assert(hasHashSeed());
+
+  hashSeed ^= value + 0x9e3779b9 + (hashSeed << 6) + (hashSeed >>> 2);
+  return hashSeed >>> 0;
+}
+
+// Get a random 32-bit number. This is like hashCombine but does not take a
+// parameter.
+function randomBits() {
+  return hashCombine(-1);
+}
+
+// Return true with probability 1 in n. E.g. oneIn(3) returns false 2/3 of the
+// time, and true 1/3 of the time.
+function oneIn(n) {
+  return (randomBits() % n) == 0;
 }
 
 // Set up the imports.
@@ -238,10 +303,20 @@ var imports = {
     // we could avoid running JS on code with SIMD in it, but it is useful to
     // fuzz such code as much as we can.)
     'log-v128': logValue,
+    'log-anyref': logRef,
+    'log-funcref': logRef,
+    'log-contref': logRef,
+    'log-externref': logRef,
 
     // Throw an exception from JS.
-    'throw': () => {
-      throw 'some JS error';
+    'throw': (which) => {
+      if (!which) {
+        // Throw a JS exception.
+        throw new Error('js exception');
+      } else {
+        // Throw a wasm exception.
+        throw new WebAssembly.Exception(wasmTag, [which]);
+      }
     },
 
     // Table operations.
@@ -253,19 +328,39 @@ var imports = {
     },
 
     // Export operations.
-    'call-export': /* async */ (index) => {
-      /* await */ callFunc(exportList[index].value);
+    'call-export': /* async */ (index, flags) => {
+      var rethrow = flags & 1;
+      if (JSPI) {
+        // TODO: Figure out why JSPI fails here.
+        rethrow = 0;
+      }
+      if (!rethrow) {
+        /* await */ callFunc(exportList[index].value);
+      } else {
+        tryCall(/* async */ () => /* await */ callFunc(exportList[index].value),
+                rethrow);
+      }
     },
     'call-export-catch': /* async */ (index) => {
       return tryCall(/* async */ () => /* await */ callFunc(exportList[index].value));
     },
 
     // Funcref operations.
-    'call-ref': /* async */ (ref) => {
+    'call-ref': /* async */ (ref, flags) => {
       // This is a direct function reference, and just like an export, it must
       // be wrapped for JSPI.
       ref = wrapExportForJSPI(ref);
-      /* await */ callFunc(ref);
+      var rethrow = flags & 1;
+      if (JSPI) {
+        // TODO: Figure out why JSPI fails here.
+        rethrow = 0;
+      }
+      if (!rethrow) {
+        /* await */ callFunc(ref);
+      } else {
+        tryCall(/* async */ () => /* await */ callFunc(ref),
+                rethrow);
+      }
     },
     'call-ref-catch': /* async */ (ref) => {
       ref = wrapExportForJSPI(ref);
@@ -274,7 +369,10 @@ var imports = {
 
     // Sleep a given amount of ms (when JSPI) and return a given id after that.
     'sleep': (ms, id) => {
-      if (!JSPI) {
+      // Also avoid sleeping even in JSPI mode, rarely, just to add variety
+      // here. Only do this when we have a hash seed, that is, when we are
+      // allowing randomness.
+      if (!JSPI || (hasHashSeed() && oneIn(10))) {
         return id;
       }
       return new Promise((resolve, reject) => {
@@ -287,6 +385,10 @@ var imports = {
                //       how many time units to wait).
       });
     },
+
+    'log-branch': (id, expected, actual) => {
+      console.log(`[LoggingExternalInterface log-branch ${id} ${expected} ${actual}]`);
+    },
   },
   // Emscripten support.
   'env': {
@@ -295,8 +397,17 @@ var imports = {
   },
 };
 
-// If Tags are available, add the import j2wasm expects.
+// If Tags are available, add some.
 if (typeof WebAssembly.Tag !== 'undefined') {
+  // A tag for general use in the fuzzer.
+  var wasmTag = imports['fuzzing-support']['wasmtag'] = new WebAssembly.Tag({
+    'parameters': ['i32']
+  });
+
+  // The JSTag that represents a JS tag.
+  imports['fuzzing-support']['jstag'] = WebAssembly.JSTag;
+
+  // This allows j2wasm content to run in the fuzzer.
   imports['imports'] = {
     'j2wasm.ExceptionUtils.tag': new WebAssembly.Tag({
       'parameters': ['externref']
@@ -320,11 +431,14 @@ function wrapExportForJSPI(value) {
   return value;
 }
 
-// If a second binary will be linked in then set up the imports for
-// placeholders. Any import like  (import "placeholder" "0" (func ..  will be
-// provided by the secondary module, and must be called using an indirection.
+// If we are fuzzing a split module, a secondary binary will have imports for
+// placeholders, whose module name defaults to 'placeholder.deferred' for the
+// two-module split. Any import like
+// (import "placeholder.deferred" "0" (func ..))
+// will be provided by the secondary module, and must be called using an
+// indirection.
 if (secondBinary) {
-  imports['placeholder'] = new Proxy({}, {
+  imports['placeholder.deferred'] = new Proxy({}, {
     get(target, prop, receiver) {
       // Return a function that throws. We could do an indirect call using the
       // exported table, but as we immediately link in the secondary module,
@@ -338,8 +452,15 @@ if (secondBinary) {
   });
 }
 
-// Compile and instantiate a wasm file.
-function build(binary) {
+// Compile and instantiate a wasm file. Receives the binary to build, and
+// whether it is the second one.
+function build(binary, isSecond) {
+  if (isSecond) {
+    assert(secondBinary);
+    // Provide the primary module's exports to the secondary.
+    imports['primary'] = exports;
+  }
+
   var module = new WebAssembly.Module(binary);
 
   var instance;
@@ -348,6 +469,14 @@ function build(binary) {
   } catch (e) {
     console.log('exception thrown: failed to instantiate module: ' + e);
     quit();
+  }
+
+  // Do not add the second instance's exports to the list, as that would be
+  // noticeable by calls to call-export-*. When fuzzing wasm-split, we want the
+  // original module's exports to be provided from the primary module, and it is
+  // the only interface to the outside.
+  if (fuzzSplit && isSecond) {
+    return;
   }
 
   // Update the exports. Note that this adds onto |exports| and |exportList|,
@@ -367,15 +496,15 @@ function build(binary) {
     var value = instance.exports[key];
     value = wrapExportForJSPI(value);
     exports[key] = value;
+
+    if (fuzzSplit && key.startsWith('__fuzz_split_')) {
+      // We are fuzzing wasm-split, and this is a new export generated by
+      // wasm-split. Do not note these exports as callable from call-export*,
+      // as they do not match the original pre-split module.
+      continue;
+    }
     exportList.push({ name: key, value: value });
   }
-}
-
-// Simple deterministic hashing, on an unsigned 32-bit seed. See e.g.
-// https://www.boost.org/doc/libs/1_55_0/doc/html/hash/reference.html#boost.hash_combine
-function hashCombine(seed, value) {
-  seed ^= value + 0x9e3779b9 + (seed << 6) + (seed >>> 2);
-  return seed >>> 0;
 }
 
 // Run the code by calling exports. The optional |ordering| parameter indicates
@@ -385,6 +514,8 @@ function hashCombine(seed, value) {
 // provided, it is a random seed we use to make deterministic choices on
 // the order of calls.
 /* async */ function callExports(ordering) {
+  hashSeed = ordering;
+
   // Call the exports we were told, or if we were not given an explicit list,
   // call them all.
   let relevantExports = exportsToCall || exportList;
@@ -425,13 +556,12 @@ function hashCombine(seed, value) {
       task = tasks.pop();
     } else {
       // Pick a random task.
-      ordering = hashCombine(ordering, tasks.length);
-      let i = ordering % tasks.length;
+      let i = hashCombine(tasks.length) % tasks.length;
       task = tasks.splice(i, 1)[0];
     }
 
     // Execute the task.
-    console.log('[fuzz-exec] calling ' + task.name);
+    console.log(`[fuzz-exec] calling ${task.name}${task.deferred ? ' (after defer)' : ''}`);
     let result;
     try {
       result = task.func();
@@ -451,10 +581,7 @@ function hashCombine(seed, value) {
       //       depending on each other, ensuring certain orders of execution.
       if (ordering !== undefined && !task.deferred && result &&
           typeof result == 'object' && typeof result.then === 'function') {
-        // Hash with -1 here, just to get something different than the hashing a
-        // few lines above.
-        ordering = hashCombine(ordering, -1);
-        if (ordering & 1) {
+        if (randomBits() & 1) {
           // Defer it for later. Reuse the existing task for simplicity.
           console.log(`(jspi: defer ${task.name})`);
           task.func = /* async */ () => {
@@ -489,7 +616,7 @@ build(binary);
 
 // Build the second wasm, if one was provided.
 if (secondBinary) {
-  build(secondBinary);
+  build(secondBinary, true);
 }
 
 // Run.
