@@ -44,12 +44,14 @@ Name LIND_NAMESPACE("lind");
 struct EpochInjection : public WalkerPass<PostWalker<EpochInjection>> {
   // The module name the epoch function is imported from.
   IString epochModule;
+  bool importedEpoch;
 
   // Adds calls to new imports.
   bool addsEffects() override { return true; }
 
   void run(Module* module) override {
     epochModule = getArgumentOrDefault("epoch_callback", "");
+    importedEpoch = hasArgument("epoch-import");
     Super::run(module);
   }
 
@@ -72,18 +74,25 @@ struct EpochInjection : public WalkerPass<PostWalker<EpochInjection>> {
 
     // Add the import
     auto import =
-      Builder::makeFunction(EPOCH_CALLBACK, Signature(Type::none, Type::none), {});
+      Builder::makeFunction(
+        EPOCH_CALLBACK, Type(Signature(Type::none, Type::none), NonNullable, Inexact), {});
 
     auto epoch = Builder::makeGlobal(EPOCH,
                                             Type::i64,
                                             builder.makeConst(int64_t(0)),
                                             Builder::Mutable);
+    if (importedEpoch) {
+      epoch->module = LIND_NAMESPACE;
+      epoch->base = EPOCH;
+    }
 
     import->module = LIND_NAMESPACE;
     import->base = EPOCH_CALLBACK;
     curr->addFunction(std::move(import));
     curr->addGlobal(std::move(epoch));
-    curr->addExport(builder.makeExport(EPOCH, EPOCH, ExternalKind::Global));
+    if (!importedEpoch) {
+      curr->addExport(builder.makeExport(EPOCH, EPOCH, ExternalKind::Global));
+    }
   }
 
 private:
