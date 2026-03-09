@@ -26,11 +26,18 @@
 namespace wasm::WATParser {
 
 // Parse a single WAT module.
-Result<> parseModule(Module& wasm, std::string_view in);
+Result<> parseModule(Module& wasm,
+                     std::string_view in,
+                     std::optional<std::string> filename = std::nullopt);
 
 // Parse a single WAT module that may have other things after it, as in a wast
 // file.
 Result<> parseModule(Module& wasm, Lexer& lexer);
+
+// Similar to `parseModule`, parse the fields of a single WAT module (after the
+// initial module definition including its name) and stop at the ending right
+// paren.
+Result<> parseModuleBody(Module& wasm, Lexer& lexer);
 
 Result<Literal> parseConst(Lexer& lexer);
 
@@ -56,6 +63,8 @@ struct RefResult {
   HeapType type;
 };
 
+struct NullRefResult {};
+
 enum class NaNKind { Canonical, Arithmetic };
 
 struct NaNResult {
@@ -67,7 +76,8 @@ using LaneResult = std::variant<Literal, NaNResult>;
 
 using LaneResults = std::vector<LaneResult>;
 
-using ExpectedResult = std::variant<Literal, RefResult, NaNResult, LaneResults>;
+using ExpectedResult =
+  std::variant<Literal, NullRefResult, RefResult, NaNResult, LaneResults>;
 
 using ExpectedResults = std::vector<ExpectedResult>;
 
@@ -76,7 +86,7 @@ struct AssertReturn {
   ExpectedResults expected;
 };
 
-enum class ActionAssertionType { Trap, Exhaustion, Exception };
+enum class ActionAssertionType { Trap, Exhaustion, Exception, Suspension };
 
 struct AssertAction {
   ActionAssertionType type;
@@ -90,7 +100,10 @@ struct QuotedModule {
   std::string module;
 };
 
-using WASTModule = std::variant<QuotedModule, std::shared_ptr<Module>>;
+struct WASTModule {
+  bool isDefinition = false;
+  std::variant<QuotedModule, std::shared_ptr<Module>> module;
+};
 
 enum class ModuleAssertionType { Trap, Malformed, Invalid, Unlinkable };
 
@@ -102,10 +115,21 @@ struct AssertModule {
 using Assertion = std::variant<AssertReturn, AssertAction, AssertModule>;
 
 struct Register {
+  // TODO: Rename this to distinguish it from instanceName.
   Name name;
+  std::optional<Name> instanceName = std::nullopt;
 };
 
-using WASTCommand = std::variant<WASTModule, Register, Action, Assertion>;
+struct ModuleInstantiation {
+  // If not specified, instantiate the most recent module definition.
+  std::optional<Name> moduleName;
+
+  // If not specified, use the moduleName
+  std::optional<Name> instanceName;
+};
+
+using WASTCommand =
+  std::variant<WASTModule, Register, Action, Assertion, ModuleInstantiation>;
 
 struct ScriptEntry {
   WASTCommand cmd;

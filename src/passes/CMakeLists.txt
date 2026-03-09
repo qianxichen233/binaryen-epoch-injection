@@ -15,6 +15,7 @@ FILE(GLOB passes_HEADERS *.h)
 set(passes_SOURCES
   param-utils.cpp
   pass.cpp
+  string-utils.cpp
   test_passes.cpp
   AbstractTypeRefining.cpp
   AlignmentLowering.cpp
@@ -27,6 +28,7 @@ set(passes_SOURCES
   ConstHoisting.cpp
   DataFlowOpts.cpp
   DeadArgumentElimination.cpp
+  DeadArgumentElimination2.cpp
   DeadCodeElimination.cpp
   DeAlign.cpp
   DebugLocationPropagation.cpp
@@ -45,18 +47,17 @@ set(passes_SOURCES
   GlobalStructInference.cpp
   GlobalTypeOptimization.cpp
   GUFA.cpp
-  hash-stringify-walker.cpp
   Outlining.cpp
   Heap2Local.cpp
   HeapStoreOptimization.cpp
   I64ToI32Lowering.cpp
   Inlining.cpp
+  InstrumentBranchHints.cpp
   InstrumentLocals.cpp
   InstrumentMemory.cpp
   Intrinsics.cpp
   J2CLItableMerging.cpp
   J2CLOpts.cpp
-  JSPI.cpp
   LegalizeJSInterface.cpp
   LimitSegments.cpp
   LLVMMemoryCopyFillLowering.cpp
@@ -97,14 +98,18 @@ set(passes_SOURCES
   SignaturePruning.cpp
   SignatureRefining.cpp
   SignExtLowering.cpp
+  StringLifting.cpp
   StringLowering.cpp
   Strip.cpp
   StripTargetFeatures.cpp
+  StripToolchainAnnotations.cpp
   TraceCalls.cpp
+  RandomizeBranchHints.cpp
   RedundantSetElimination.cpp
   RemoveImports.cpp
   RemoveMemoryInit.cpp
   RemoveNonJSOps.cpp
+  RemoveRelaxedSIMD.cpp
   RemoveUnusedBrs.cpp
   RemoveUnusedNames.cpp
   RemoveUnusedModuleElements.cpp
@@ -112,6 +117,7 @@ set(passes_SOURCES
   ReorderFunctions.cpp
   ReorderGlobals.cpp
   ReorderLocals.cpp
+  ReorderTypes.cpp
   ReReloop.cpp
   TrapMode.cpp
   TypeGeneralizing.cpp

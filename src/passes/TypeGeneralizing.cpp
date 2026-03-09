@@ -15,7 +15,6 @@
  */
 
 #include "analysis/cfg.h"
-#include "analysis/lattice.h"
 #include "analysis/lattices/inverted.h"
 #include "analysis/lattices/shared.h"
 #include "analysis/lattices/stack.h"
@@ -28,7 +27,9 @@
 #include "wasm-traversal.h"
 #include "wasm.h"
 
+#ifndef TYPE_GENERALIZING_DEBUG
 #define TYPE_GENERALIZING_DEBUG 0
+#endif
 
 #if TYPE_GENERALIZING_DEBUG
 #define DBG(statement) statement
@@ -417,6 +418,7 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
   void visitAtomicWait(AtomicWait* curr) {}
   void visitAtomicNotify(AtomicNotify* curr) {}
   void visitAtomicFence(AtomicFence* curr) {}
+  void visitPause(Pause* curr) {}
   void visitSIMDExtract(SIMDExtract* curr) {}
   void visitSIMDReplace(SIMDReplace* curr) {}
   void visitSIMDShuffle(SIMDShuffle* curr) {}
@@ -500,6 +502,8 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
   }
 
   void visitTableInit(TableInit* curr) {}
+
+  void visitElemDrop(ElemDrop* curr) {}
 
   void visitTry(Try* curr) { WASM_UNREACHABLE("TODO"); }
   void visitTryTable(TryTable* curr) { WASM_UNREACHABLE("TODO"); }
@@ -595,6 +599,8 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
     push(Type::none);
   }
 
+  void visitRefGetDesc(RefGetDesc* curr) { WASM_UNREACHABLE("TODO"); }
+
   void visitBrOn(BrOn* curr) {
     // Like br_if, these instructions do different things to the stack depending
     // on whether the branch is taken or not. For branches that drop the tested
@@ -682,12 +688,19 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
     }
     auto generalized = generalizeStructType(type, curr->index);
     push(Type(generalized, Nullable));
-    push(generalized.getStruct().fields[curr->index].type);
+    auto fieldType = generalized.getStruct().fields[curr->index].type;
+    if (fieldType.isRef()) {
+      push(fieldType);
+    }
   }
 
   void visitStructRMW(StructRMW* curr) { WASM_UNREACHABLE("TODO"); }
 
   void visitStructCmpxchg(StructCmpxchg* curr) { WASM_UNREACHABLE("TODO"); }
+
+  void visitStructWait(StructWait* curr) { WASM_UNREACHABLE("TODO"); }
+
+  void visitStructNotify(StructNotify* curr) { WASM_UNREACHABLE("TODO"); }
 
   void visitArrayNew(ArrayNew* curr) {
     // We cannot yet generalize allocations. Push a requirement for the
@@ -724,6 +737,10 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
       }
     }
   }
+
+  void visitArrayRMW(ArrayRMW* curr) { WASM_UNREACHABLE("TODO"); }
+
+  void visitArrayCmpxchg(ArrayCmpxchg* curr) { WASM_UNREACHABLE("TODO"); }
 
   HeapType
   generalizeArrayType(HeapType type,
@@ -852,6 +869,11 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
 
   void visitRefAs(RefAs* curr) {
     auto type = pop();
+    if (type == Type::none) {
+      // No downstream requirement, so no requirement for the input either.
+      push(Type::none);
+      return;
+    }
     switch (curr->op) {
       case RefAsNonNull:
         push(Type(type.getHeapType(), Nullable));
@@ -872,13 +894,16 @@ struct TransferFn : OverriddenVisitor<TransferFn> {
   void visitStringEncode(StringEncode* curr) { WASM_UNREACHABLE("TODO"); }
   void visitStringConcat(StringConcat* curr) { WASM_UNREACHABLE("TODO"); }
   void visitStringEq(StringEq* curr) { WASM_UNREACHABLE("TODO"); }
+  void visitStringTest(StringTest* curr) { WASM_UNREACHABLE("TODO"); }
   void visitStringWTF16Get(StringWTF16Get* curr) { WASM_UNREACHABLE("TODO"); }
   void visitStringSliceWTF(StringSliceWTF* curr) { WASM_UNREACHABLE("TODO"); }
 
-  void visitContBind(ContBind* curr) { WASM_UNREACHABLE("TODO"); }
   void visitContNew(ContNew* curr) { WASM_UNREACHABLE("TODO"); }
-  void visitResume(Resume* curr) { WASM_UNREACHABLE("TODO"); }
+  void visitContBind(ContBind* curr) { WASM_UNREACHABLE("TODO"); }
   void visitSuspend(Suspend* curr) { WASM_UNREACHABLE("TODO"); }
+  void visitResume(Resume* curr) { WASM_UNREACHABLE("TODO"); }
+  void visitResumeThrow(ResumeThrow* curr) { WASM_UNREACHABLE("TODO"); }
+  void visitStackSwitch(StackSwitch* curr) { WASM_UNREACHABLE("TODO"); }
 };
 
 struct TypeGeneralizing : WalkerPass<PostWalker<TypeGeneralizing>> {

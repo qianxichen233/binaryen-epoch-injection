@@ -26,6 +26,10 @@
 #include "passes.h"
 #include "wasm.h"
 
+#ifndef J2CL_OPT_DEBUG
+#define J2CL_OPT_DEBUG 0
+#endif
+
 namespace wasm {
 
 namespace {
@@ -88,6 +92,10 @@ public:
     : assignmentCounts(assignmentCounts) {}
 
   void visitGlobal(Global* curr) {
+    // Ignore imported globals, e.g., JS prototypes.
+    if (curr->imported()) {
+      return;
+    }
     if (isInitialValue(curr->init)) {
       return;
     }
@@ -288,7 +296,7 @@ struct J2CLOpts : public Pass {
       inliner.run(getPassRunner(), module);
       int inlined = inliner.inlined;
 
-#ifdef J2CL_OPT_DEBUG
+#if J2CL_OPT_DEBUG
       std::cout << "Optimized " << optimized << " global fields\n";
 #endif
       if (optimized == 0 && inlined == 0) {

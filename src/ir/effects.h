@@ -29,8 +29,7 @@ class EffectAnalyzer {
 public:
   EffectAnalyzer(const PassOptions& passOptions, Module& module)
     : ignoreImplicitTraps(passOptions.ignoreImplicitTraps),
-      trapsNeverHappen(passOptions.trapsNeverHappen),
-      funcEffectsMap(passOptions.funcEffectsMap), module(module),
+      trapsNeverHappen(passOptions.trapsNeverHappen), module(module),
       features(module.features) {}
 
   EffectAnalyzer(const PassOptions& passOptions,
@@ -47,7 +46,6 @@ public:
 
   bool ignoreImplicitTraps;
   bool trapsNeverHappen;
-  std::shared_ptr<FuncEffectsMap> funcEffectsMap;
   Module& module;
   FeatureSet features;
 
@@ -523,12 +521,14 @@ private:
         return;
       }
 
+      // Get the target's effects, if they exist. Note that we must handle the
+      // case of the function not yet existing (we may be executed in the middle
+      // of a pass, which may have built up calls but not the targets of those
+      // calls; in such a case, we do not find the targets and therefore assume
+      // we know nothing about the effects, which is safe).
       const EffectAnalyzer* targetEffects = nullptr;
-      if (parent.funcEffectsMap) {
-        auto iter = parent.funcEffectsMap->find(curr->target);
-        if (iter != parent.funcEffectsMap->end()) {
-          targetEffects = &iter->second;
-        }
+      if (auto* target = parent.module.getFunctionOrNull(curr->target)) {
+        targetEffects = target->effects.get();
       }
 
       if (curr->isReturn) {
@@ -598,12 +598,12 @@ private:
     }
     void visitLoad(Load* curr) {
       parent.readsMemory = true;
-      parent.isAtomic |= curr->isAtomic;
+      parent.isAtomic |= curr->isAtomic();
       parent.implicitTrap = true;
     }
     void visitStore(Store* curr) {
       parent.writesMemory = true;
-      parent.isAtomic |= curr->isAtomic;
+      parent.isAtomic |= curr->isAtomic();
       parent.implicitTrap = true;
     }
     void visitAtomicRMW(AtomicRMW* curr) {
@@ -642,6 +642,12 @@ private:
       parent.readsMemory = true;
       parent.writesMemory = true;
       parent.isAtomic = true;
+    }
+    void visitPause(Pause* curr) {
+      // We don't want this to be moved out of loops, but it doesn't otherwises
+      // matter much how it gets reordered. Say we transfer control as a coarse
+      // approximation of this.
+      parent.branchesOut = true;
     }
     void visitSIMDExtract(SIMDExtract* curr) {}
     void visitSIMDReplace(SIMDReplace* curr) {}
@@ -782,6 +788,7 @@ private:
       parent.writesTable = true;
       parent.implicitTrap = true;
     }
+    void visitElemDrop(ElemDrop* curr) { parent.writesTable = true; }
     void visitTry(Try* curr) {
       if (curr->delegateTarget.is()) {
         parent.delegateTargets.insert(curr->delegateTarget);
@@ -848,12 +855,30 @@ private:
       }
     }
     void visitRefTest(RefTest* curr) {}
+    void maybeHandleDescriptor(Expression* desc) {
+      if (desc) {
+        // Traps when the descriptor is null.
+        if (desc->type.isNull()) {
+          parent.trap = true;
+        } else if (desc->type.isNullable()) {
+          parent.implicitTrap = true;
+        }
+      }
+    }
     void visitRefCast(RefCast* curr) {
-      // Traps if the ref is not null and the cast fails.
+      // Traps if the cast fails.
+      parent.implicitTrap = true;
+      maybeHandleDescriptor(curr->desc);
+    }
+    void visitRefGetDesc(RefGetDesc* curr) {
+      // Traps if the ref is null.
       parent.implicitTrap = true;
     }
-    void visitBrOn(BrOn* curr) { parent.breakTargets.insert(curr->name); }
-    void visitStructNew(StructNew* curr) {}
+    void visitBrOn(BrOn* curr) {
+      parent.breakTargets.insert(curr->name);
+      maybeHandleDescriptor(curr->desc);
+    }
+    void visitStructNew(StructNew* curr) { maybeHandleDescriptor(curr->desc); }
     void visitStructGet(StructGet* curr) {
       if (curr->ref->type == Type::unreachable) {
         return;
@@ -924,6 +949,60 @@ private:
       }
       assert(curr->order != MemoryOrder::Unordered);
       parent.isAtomic = true;
+    }
+    void visitStructWait(StructWait* curr) {
+      if (curr->ref->type.isNull()) {
+        parent.trap = true;
+        return;
+      }
+      parent.isAtomic = true;
+
+      if (curr->ref->type.isNullable()) {
+        parent.implicitTrap = true;
+      }
+
+      // If the timeout is negative and no-one wakes us.
+      parent.mayNotReturn = true;
+
+      // struct.wait mutates an opaque waiter queue which isn't visible in user
+      // code. Model this as a struct write which prevents reorderings (since
+      // isAtomic == true).
+      parent.writesStruct = true;
+
+      if (curr->ref->type == Type::unreachable) {
+        return;
+      }
+
+      // If the ref isn't `unreachable`, then the field must exist and be a
+      // packed waitqueue due to validation.
+      assert(curr->ref->type.isStruct());
+      assert(curr->index <
+             curr->ref->type.getHeapType().getStruct().fields.size());
+      assert(curr->ref->type.getHeapType()
+               .getStruct()
+               .fields.at(curr->index)
+               .packedType == Field::PackedType::WaitQueue);
+
+      parent.readsMutableStruct |= curr->ref->type.getHeapType()
+                                     .getStruct()
+                                     .fields.at(curr->index)
+                                     .mutable_ == Mutable;
+    }
+    void visitStructNotify(StructNotify* curr) {
+      if (curr->ref->type.isNull()) {
+        parent.trap = true;
+        return;
+      }
+      parent.isAtomic = true;
+
+      if (curr->ref->type.isNullable()) {
+        parent.implicitTrap = true;
+      }
+
+      // struct.notify mutates an opaque waiter queue which isn't visible in
+      // user code. Model this as a struct write which prevents reorderings
+      // (since isAtomic == true).
+      parent.writesStruct = true;
     }
     void visitArrayNew(ArrayNew* curr) {}
     void visitArrayNewData(ArrayNewData* curr) {
@@ -996,6 +1075,30 @@ private:
     }
     void visitArrayInitData(ArrayInitData* curr) { visitArrayInit(curr); }
     void visitArrayInitElem(ArrayInitElem* curr) { visitArrayInit(curr); }
+    void visitArrayRMW(ArrayRMW* curr) {
+      if (curr->ref->type.isNull()) {
+        parent.trap = true;
+        return;
+      }
+      parent.readsArray = true;
+      parent.writesArray = true;
+      // traps when the arg is null or the index out of bounds
+      parent.implicitTrap = true;
+      assert(curr->order != MemoryOrder::Unordered);
+      parent.isAtomic = true;
+    }
+    void visitArrayCmpxchg(ArrayCmpxchg* curr) {
+      if (curr->ref->type.isNull()) {
+        parent.trap = true;
+        return;
+      }
+      parent.readsArray = true;
+      parent.writesArray = true;
+      // traps when the arg is null or the index out of bounds
+      parent.implicitTrap = true;
+      assert(curr->order != MemoryOrder::Unordered);
+      parent.isAtomic = true;
+    }
     void visitRefAs(RefAs* curr) {
       if (curr->op == AnyConvertExtern || curr->op == ExternConvertAny) {
         // These conversions are infallible.
@@ -1041,6 +1144,7 @@ private:
         }
       }
     }
+    void visitStringTest(StringTest* curr) {}
     void visitStringWTF16Get(StringWTF16Get* curr) {
       // traps when ref is null.
       parent.implicitTrap = true;
@@ -1049,12 +1153,29 @@ private:
       // traps when ref is null.
       parent.implicitTrap = true;
     }
+    void visitContNew(ContNew* curr) {
+      // traps when curr->func is null ref.
+      parent.implicitTrap = true;
+    }
     void visitContBind(ContBind* curr) {
       // traps when curr->cont is null ref.
       parent.implicitTrap = true;
+
+      // The input continuation is modified, as it will trap if resumed. This is
+      // a globally-noticeable effect, which we model as a call for now, but we
+      // could in theory use something more refined here (|modifiesContinuation|
+      // perhaps, to parallel |writesMemory| etc.).
+      parent.calls = true;
     }
-    void visitContNew(ContNew* curr) {
-      // traps when curr->func is null ref.
+    void visitSuspend(Suspend* curr) {
+      // Similar to resume/call: Suspending means that we execute arbitrary
+      // other code before we may resume here.
+      parent.calls = true;
+      if (parent.features.hasExceptionHandling() && parent.tryDepth == 0) {
+        parent.throws_ = true;
+      }
+
+      // A suspend may go unhandled and therefore trap.
       parent.implicitTrap = true;
     }
     void visitResume(Resume* curr) {
@@ -1069,10 +1190,26 @@ private:
         parent.throws_ = true;
       }
     }
-    void visitSuspend(Suspend* curr) {
-      // Similar to resume/call: Suspending means that we execute arbitrary
-      // other code before we may resume here.
+    void visitResumeThrow(ResumeThrow* curr) {
+      // This acts as a kitchen sink effect.
       parent.calls = true;
+
+      // resume_throw instructions accept nullable continuation
+      // references and trap on null.
+      parent.implicitTrap = true;
+
+      if (parent.features.hasExceptionHandling() && parent.tryDepth == 0) {
+        parent.throws_ = true;
+      }
+    }
+    void visitStackSwitch(StackSwitch* curr) {
+      // This acts as a kitchen sink effect.
+      parent.calls = true;
+
+      // switch instructions accept nullable continuation references
+      // and trap on null.
+      parent.implicitTrap = true;
+
       if (parent.features.hasExceptionHandling() && parent.tryDepth == 0) {
         parent.throws_ = true;
       }

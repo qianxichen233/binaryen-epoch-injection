@@ -71,11 +71,12 @@ struct LegalizeJSInterface : public Pass {
     for (auto& ex : module->exports) {
       if (ex->kind == ExternalKind::Function) {
         // if it's an import, ignore it
-        auto* func = module->getFunction(ex->value);
+        auto* name = ex->getInternalName();
+        auto* func = module->getFunction(*name);
         if (isIllegal(func)) {
           // Provide a legal function for the export.
           auto legalName = makeLegalStub(func, module);
-          ex->value = legalName;
+          *name = legalName;
           if (exportOriginals) {
             // Also export the original function, before legalization. This is
             // not normally useful for JS, except in cases like dynamic linking
@@ -107,22 +108,14 @@ struct LegalizeJSInterface : public Pass {
     // for each illegal import, we must call a legalized stub instead
     for (auto* im : originalFunctions) {
       if (im->imported() && isIllegal(im)) {
-        auto funcName = makeLegalStubForCalledImport(im, module);
-        illegalImportsToLegal[im->name] = funcName;
-        // we need to use the legalized version in the tables, as the import
-        // from JS is legal for JS. Our stub makes it look like a native wasm
-        // function.
-        ElementUtils::iterAllElementFunctionNames(module, [&](Name& name) {
-          if (name == im->name) {
-            name = funcName;
-          }
-        });
+        auto* func = makeLegalStubForCalledImport(im, module);
+        illegalImportsToLegal[im->name] = func;
       }
     }
 
     if (!illegalImportsToLegal.empty()) {
-      // fix up imports: call_import of an illegal must be turned to a call of a
-      // legal. the same must be done with ref.funcs.
+      // fix up imports: call of an illegal import must be turned to a call of a
+      // legal import. the same must be done with ref.funcs.
       struct Fixer : public WalkerPass<PostWalker<Fixer>> {
         bool isFunctionParallel() override { return true; }
 
@@ -130,34 +123,36 @@ struct LegalizeJSInterface : public Pass {
           return std::make_unique<Fixer>(illegalImportsToLegal);
         }
 
-        std::map<Name, Name>* illegalImportsToLegal;
+        std::unordered_map<Name, Function*>& illegalImportsToLegal;
 
-        Fixer(std::map<Name, Name>* illegalImportsToLegal)
+        Fixer(std::unordered_map<Name, Function*>& illegalImportsToLegal)
           : illegalImportsToLegal(illegalImportsToLegal) {}
 
         void visitCall(Call* curr) {
-          auto iter = illegalImportsToLegal->find(curr->target);
-          if (iter == illegalImportsToLegal->end()) {
+          auto iter = illegalImportsToLegal.find(curr->target);
+          if (iter == illegalImportsToLegal.end()) {
             return;
           }
 
-          replaceCurrent(
-            Builder(*getModule())
-              .makeCall(
-                iter->second, curr->operands, curr->type, curr->isReturn));
+          replaceCurrent(Builder(*getModule())
+                           .makeCall(iter->second->name,
+                                     curr->operands,
+                                     curr->type,
+                                     curr->isReturn));
         }
 
         void visitRefFunc(RefFunc* curr) {
-          auto iter = illegalImportsToLegal->find(curr->func);
-          if (iter == illegalImportsToLegal->end()) {
+          auto iter = illegalImportsToLegal.find(curr->func);
+          if (iter == illegalImportsToLegal.end()) {
             return;
           }
 
-          curr->func = iter->second;
+          curr->func = iter->second->name;
+          curr->finalize(*getModule());
         }
       };
 
-      Fixer fixer(&illegalImportsToLegal);
+      Fixer fixer(illegalImportsToLegal);
       fixer.run(getPassRunner(), module);
       fixer.runOnModuleCode(getPassRunner(), module);
 
@@ -173,7 +168,7 @@ struct LegalizeJSInterface : public Pass {
 
 private:
   // map of illegal to legal names for imports
-  std::map<Name, Name> illegalImportsToLegal;
+  std::unordered_map<Name, Function*> illegalImportsToLegal;
   bool exportedHelpers = false;
   Function* getTempRet0 = nullptr;
   Function* setTempRet0 = nullptr;
@@ -193,7 +188,9 @@ private:
     if (!setTempRet0) {
       if (exportedHelpers) {
         auto* ex = module->getExport(SET_TEMP_RET_EXPORT);
-        setTempRet0 = module->getFunction(ex->value);
+        setTempRet0 = module->getFunction((ex->kind == ExternalKind::Function)
+                                            ? *ex->getInternalName()
+                                            : Name());
       } else {
         setTempRet0 = getFunctionOrImport(
           module, SET_TEMP_RET_IMPORT, Type::i32, Type::none);
@@ -206,7 +203,9 @@ private:
     if (!getTempRet0) {
       if (exportedHelpers) {
         auto* ex = module->getExport(GET_TEMP_RET_EXPORT);
-        getTempRet0 = module->getFunction(ex->value);
+        getTempRet0 = module->getFunction((ex->kind == ExternalKind::Function)
+                                            ? *ex->getInternalName()
+                                            : Name());
       } else {
         getTempRet0 = getFunctionOrImport(
           module, GET_TEMP_RET_IMPORT, Type::none, Type::i32);
@@ -249,7 +248,8 @@ private:
     }
     Type resultsType =
       func->getResults() == Type::i64 ? Type::i32 : func->getResults();
-    legal->type = Signature(Type(legalParams), resultsType);
+    legal->type =
+      Type(Signature(Type(legalParams), resultsType), NonNullable, Exact);
     if (func->getResults() == Type::i64) {
       auto index = Builder::addVar(legal, Name(), Type::i64);
       auto* block = builder.makeBlock();
@@ -269,7 +269,7 @@ private:
 
   // wasm calls the import, so it must call a stub that calls the actual legal
   // JS import
-  Name makeLegalStubForCalledImport(Function* im, Module* module) {
+  Function* makeLegalStubForCalledImport(Function* im, Module* module) {
     Builder builder(*module);
     auto legalIm = std::make_unique<Function>();
     legalIm->name = Name(std::string("legalimport$") + im->name.toString());
@@ -278,7 +278,7 @@ private:
     legalIm->hasExplicitName = true;
     auto stub = std::make_unique<Function>();
     stub->name = Name(std::string("legalfunc$") + im->name.toString());
-    stub->type = im->type;
+    stub->type = im->type.with(Exact);
     stub->hasExplicitName = true;
 
     auto* call = module->allocator.alloc<Call>();
@@ -308,16 +308,17 @@ private:
       call->type = im->getResults();
       stub->body = call;
     }
-    legalIm->type = Signature(Type(params), call->type);
+    legalIm->type =
+      Type(Signature(Type(params), call->type), NonNullable, Inexact);
 
-    const auto& stubName = stub->name;
-    if (!module->getFunctionOrNull(stubName)) {
+    auto* stubPtr = stub.get();
+    if (!module->getFunctionOrNull(stub->name)) {
       module->addFunction(std::move(stub));
     }
     if (!module->getFunctionOrNull(legalIm->name)) {
       module->addFunction(std::move(legalIm));
     }
-    return stubName;
+    return stubPtr;
   }
 
   static Function*
@@ -332,7 +333,8 @@ private:
       return f;
     }
     // Failing that create a new function import.
-    auto import = Builder::makeFunction(name, Signature(params, results), {});
+    auto import = Builder::makeFunction(
+      name, Type(Signature(params, results), NonNullable, Inexact), {});
     import->module = ENV;
     import->base = name;
     auto* ret = import.get();
@@ -361,7 +363,7 @@ struct LegalizeAndPruneJSInterface : public LegalizeJSInterface {
     std::unordered_map<Name, Name> exportedFunctions;
     for (auto& exp : module->exports) {
       if (exp->kind == ExternalKind::Function) {
-        exportedFunctions[exp->value] = exp->name;
+        exportedFunctions[*exp->getInternalName()] = exp->name;
       }
     }
 
@@ -374,8 +376,8 @@ struct LegalizeAndPruneJSInterface : public LegalizeJSInterface {
       }
 
       // The params are allowed to be multivalue, but not the results. Otherwise
-      // look for SIMD.
-      auto sig = func->type.getSignature();
+      // look for SIMD etc.
+      auto sig = func->getSig();
       auto illegal = isIllegal(sig.results);
       illegal =
         illegal || std::any_of(sig.params.begin(),
@@ -388,13 +390,17 @@ struct LegalizeAndPruneJSInterface : public LegalizeJSInterface {
       // Prune an import by implementing it in a trivial manner.
       if (imported) {
         func->module = func->base = Name();
+        func->type = func->type.with(Exact);
 
         Builder builder(*module);
         if (sig.results == Type::none) {
           func->body = builder.makeNop();
-        } else {
+        } else if (sig.results.isDefaultable()) {
           func->body =
             builder.makeConstantExpression(Literal::makeZeros(sig.results));
+        } else {
+          // We have nothing better than to trap here.
+          func->body = builder.makeUnreachable();
         }
       }
 
@@ -404,12 +410,17 @@ struct LegalizeAndPruneJSInterface : public LegalizeJSInterface {
       }
     }
 
+    // RefFunc types etc. need updating.
+    ReFinalize().run(getPassRunner(), module);
+    ReFinalize().runOnModuleCode(getPassRunner(), module);
+
     // TODO: globals etc.
   }
 
   bool isIllegal(Type type) {
     auto features = type.getFeatures();
-    return features.hasSIMD() || features.hasMultivalue();
+    return features.hasSIMD() || features.hasMultivalue() ||
+           features.hasExceptionHandling();
   }
 };
 

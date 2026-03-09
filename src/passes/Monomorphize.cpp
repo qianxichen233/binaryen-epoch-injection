@@ -24,7 +24,7 @@
 //  * If a call provides a more refined type than the function declares for a
 //    parameter.
 //  * If a call provides a constant as a parameter.
-//  * If a call provides a GC allocation as a parameter. TODO
+//  * If a call provides a GC allocation as a parameter.
 //  * If a call is dropped. TODO also other stuff on the outside, e.g. eqz?
 //
 // We realize the benefit by creating a monomorphized (specialized/refined)
@@ -792,7 +792,8 @@ struct Monomorphize : public Pass {
     // If we were dropped then we are pulling the drop into the monomorphized
     // function, which means we return nothing.
     auto newResults = context.dropped ? Type::none : func->getResults();
-    newFunc->type = Signature(Type(newParams), newResults);
+    newFunc->type =
+      Type(Signature(Type(newParams), newResults), NonNullable, Exact);
 
     // We must update local indexes: the new function has a potentially
     // different number of parameters, and parameters are at the very bottom of

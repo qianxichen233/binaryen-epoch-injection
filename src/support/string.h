@@ -58,6 +58,23 @@ public:
   }
 };
 
+template<typename StringLike,
+         typename = std::enable_if_t<
+           std::is_convertible_v<StringLike, std::string_view>>>
+std::string join(const std::vector<StringLike>& strs, std::string_view sep) {
+  if (strs.empty()) {
+    return "";
+  }
+
+  std::string ret = std::string(strs[0]);
+  for (size_t i = 1; i < strs.size(); i++) {
+    ret.append(sep);
+    ret.append(strs[i]);
+  }
+
+  return ret;
+}
+
 // Handles bracketing in a list initially split by ",", but the list may
 // contain nested ","s. For example,
 //   void foo(int, double)
@@ -101,6 +118,9 @@ bool convertUTF16ToUTF8(std::ostream& os, std::string_view str);
 
 // Whether the string is valid UTF-8.
 bool isUTF8(std::string_view str);
+
+// Given a string of properly-escaped JSON in UTF8, unescape it into WTF16.
+std::ostream& unescapeUTF8JSONtoWTF16(std::ostream& os, const char* str);
 
 } // namespace wasm::String
 

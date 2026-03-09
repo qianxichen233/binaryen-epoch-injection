@@ -7,7 +7,6 @@
   (type $i64 (struct (field (mut i64))))
   ;; CHECK:      (type $struct (struct (field (mut (ref null $struct)))))
   (type $struct (struct (field (mut (ref null $struct)))))
-
   ;; CHECK:      (type $1 (func (result i32)))
 
   ;; CHECK:      (type $2 (func (result i64)))
@@ -15,6 +14,11 @@
   ;; CHECK:      (type $3 (func (param (ref null $struct)) (result (ref null $struct))))
 
   ;; CHECK:      (type $4 (func (param (ref null $struct) (ref null $struct)) (result (ref null $struct))))
+
+  ;; CHECK:      (type $5 (func (param i32) (result i32)))
+
+  ;; CHECK:      (type $arr (array (mut i32)))
+  (type $arr (array (mut i32)))
 
   ;; CHECK:      (func $escape-rmw (type $3) (param $0 (ref null $struct)) (result (ref null $struct))
   ;; CHECK-NEXT:  (struct.atomic.rmw.xchg $struct 0
@@ -93,7 +97,6 @@
   ;; CHECK-NEXT:    (local.get $2)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-add-i32 (result i32)
@@ -127,7 +130,6 @@
   ;; CHECK-NEXT:    (local.get $2)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-sub-i32 (result i32)
@@ -161,7 +163,6 @@
   ;; CHECK-NEXT:    (local.get $2)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-and-i32 (result i32)
@@ -195,7 +196,6 @@
   ;; CHECK-NEXT:    (local.get $2)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-or-i32 (result i32)
@@ -229,7 +229,6 @@
   ;; CHECK-NEXT:    (local.get $2)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-xor-i32 (result i32)
@@ -260,7 +259,6 @@
   ;; CHECK-NEXT:  (local.set $0
   ;; CHECK-NEXT:   (local.get $2)
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-xchg-i32 (result i32)
@@ -303,7 +301,6 @@
   ;; CHECK-NEXT:    )
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-cmpxchg-i32 (result i32)
@@ -338,7 +335,6 @@
   ;; CHECK-NEXT:    (local.get $2)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-add-i64 (result i64)
@@ -372,7 +368,6 @@
   ;; CHECK-NEXT:    (local.get $2)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-sub-i64 (result i64)
@@ -406,7 +401,6 @@
   ;; CHECK-NEXT:    (local.get $2)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-and-i64 (result i64)
@@ -440,7 +434,6 @@
   ;; CHECK-NEXT:    (local.get $2)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-or-i64 (result i64)
@@ -474,7 +467,6 @@
   ;; CHECK-NEXT:    (local.get $2)
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-xor-i64 (result i64)
@@ -505,7 +497,6 @@
   ;; CHECK-NEXT:  (local.set $0
   ;; CHECK-NEXT:   (local.get $2)
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-xchg-i64 (result i64)
@@ -548,7 +539,6 @@
   ;; CHECK-NEXT:    )
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-cmpxchg-i64 (result i64)
@@ -580,7 +570,6 @@
   ;; CHECK-NEXT:  (local.set $1
   ;; CHECK-NEXT:   (local.get $3)
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $2)
   ;; CHECK-NEXT: )
   (func $rmw-xchg-ref (param (ref null $struct)) (result (ref null $struct))
@@ -623,7 +612,6 @@
   ;; CHECK-NEXT:    )
   ;; CHECK-NEXT:   )
   ;; CHECK-NEXT:  )
-  ;; CHECK-NEXT:  (atomic.fence)
   ;; CHECK-NEXT:  (local.get $3)
   ;; CHECK-NEXT: )
   (func $rmw-cmpxchg-ref (param (ref null $struct) (ref null $struct)) (result (ref null $struct))
@@ -661,7 +649,6 @@
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $rmw-acqrel (result i32)
-    ;; The replacement for an acqrel rmw does not need a fence.
     (struct.atomic.rmw.add acqrel acqrel $i32 0
       (struct.new_default $i32)
       (i32.const 1)
@@ -704,11 +691,251 @@
   ;; CHECK-NEXT:  (local.get $1)
   ;; CHECK-NEXT: )
   (func $cmpxchg-acqrel (result i32)
-    ;; The replacement for an acqrel rmw does not need a fence.
     (struct.atomic.rmw.cmpxchg acqrel acqrel $i32 0
       (struct.new_default $i32)
       (i32.const 1)
       (i32.const 2)
+    )
+  )
+
+  ;; CHECK:      (func $rmw-unreachable-value (type $1) (result i32)
+  ;; CHECK-NEXT:  (local $0 i32)
+  ;; CHECK-NEXT:  (block ;; (replaces unreachable StructRMW we can't emit)
+  ;; CHECK-NEXT:   (drop
+  ;; CHECK-NEXT:    (block (result nullref)
+  ;; CHECK-NEXT:     (local.set $0
+  ;; CHECK-NEXT:      (i32.const 0)
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:     (ref.null none)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (drop
+  ;; CHECK-NEXT:    (unreachable)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (unreachable)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $rmw-unreachable-value (result i32)
+    ;; When the value is unreachable, the whole expression is unreachable.
+    ;; We should not attempt to optimize this (it would hit an assertion
+    ;; on type == field.type since unreachable != i32).
+    (struct.atomic.rmw.add $i32 0
+      (struct.new_default $i32)
+      (unreachable)
+    )
+  )
+
+  ;; CHECK:      (func $cmpxchg-unreachable-expected (type $1) (result i32)
+  ;; CHECK-NEXT:  (local $0 i32)
+  ;; CHECK-NEXT:  (block ;; (replaces unreachable StructCmpxchg we can't emit)
+  ;; CHECK-NEXT:   (drop
+  ;; CHECK-NEXT:    (block (result nullref)
+  ;; CHECK-NEXT:     (local.set $0
+  ;; CHECK-NEXT:      (i32.const 0)
+  ;; CHECK-NEXT:     )
+  ;; CHECK-NEXT:     (ref.null none)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (drop
+  ;; CHECK-NEXT:    (unreachable)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (drop
+  ;; CHECK-NEXT:    (i32.const 1)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (unreachable)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $cmpxchg-unreachable-expected (result i32)
+    ;; When the expected operand is unreachable, the whole expression is
+    ;; unreachable. We should not attempt to optimize this.
+    (struct.atomic.rmw.cmpxchg $i32 0
+      (struct.new_default $i32)
+      (unreachable)
+      (i32.const 1)
+    )
+  )
+
+  ;; CHECK:      (func $array-rmw-add (type $1) (result i32)
+  ;; CHECK-NEXT:  (local $0 i32)
+  ;; CHECK-NEXT:  (local $1 i32)
+  ;; CHECK-NEXT:  (local $2 i32)
+  ;; CHECK-NEXT:  (local $3 i32)
+  ;; CHECK-NEXT:  (local $4 i32)
+  ;; CHECK-NEXT:  (local $5 i32)
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (block (result nullref)
+  ;; CHECK-NEXT:    (local.set $2
+  ;; CHECK-NEXT:     (i32.const 0)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:    (local.set $3
+  ;; CHECK-NEXT:     (i32.const 0)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:    (local.set $0
+  ;; CHECK-NEXT:     (local.get $2)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:    (local.set $1
+  ;; CHECK-NEXT:     (local.get $3)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:    (ref.null none)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (local.set $5
+  ;; CHECK-NEXT:   (i32.const 1)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (local.set $4
+  ;; CHECK-NEXT:   (local.get $0)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (local.set $0
+  ;; CHECK-NEXT:   (i32.add
+  ;; CHECK-NEXT:    (local.get $0)
+  ;; CHECK-NEXT:    (local.get $5)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (local.get $4)
+  ;; CHECK-NEXT: )
+  (func $array-rmw-add (result i32)
+    ;; Array atomic RMW on a non-escaping fixed-size array should be
+    ;; optimized: the array is converted to a struct, then to locals.
+    (array.atomic.rmw.add $arr
+      (array.new_fixed $arr 2
+        (i32.const 0)
+        (i32.const 0)
+      )
+      (i32.const 0)
+      (i32.const 1)
+    )
+  )
+
+  ;; CHECK:      (func $array-cmpxchg (type $1) (result i32)
+  ;; CHECK-NEXT:  (local $0 i32)
+  ;; CHECK-NEXT:  (local $1 i32)
+  ;; CHECK-NEXT:  (local $2 i32)
+  ;; CHECK-NEXT:  (local $3 i32)
+  ;; CHECK-NEXT:  (local $4 i32)
+  ;; CHECK-NEXT:  (local $5 i32)
+  ;; CHECK-NEXT:  (local $6 i32)
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (block (result nullref)
+  ;; CHECK-NEXT:    (local.set $2
+  ;; CHECK-NEXT:     (i32.const 0)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:    (local.set $3
+  ;; CHECK-NEXT:     (i32.const 0)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:    (local.set $0
+  ;; CHECK-NEXT:     (local.get $2)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:    (local.set $1
+  ;; CHECK-NEXT:     (local.get $3)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:    (ref.null none)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (local.set $5
+  ;; CHECK-NEXT:   (i32.const 10)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (local.set $6
+  ;; CHECK-NEXT:   (i32.const 20)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (local.set $4
+  ;; CHECK-NEXT:   (local.get $0)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (if
+  ;; CHECK-NEXT:   (i32.eq
+  ;; CHECK-NEXT:    (local.get $0)
+  ;; CHECK-NEXT:    (local.get $5)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (then
+  ;; CHECK-NEXT:    (local.set $0
+  ;; CHECK-NEXT:     (local.get $6)
+  ;; CHECK-NEXT:    )
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (local.get $4)
+  ;; CHECK-NEXT: )
+  (func $array-cmpxchg (result i32)
+    ;; Array atomic cmpxchg on a non-escaping fixed-size array should be
+    ;; optimized similarly.
+    (array.atomic.rmw.cmpxchg $arr
+      (array.new_fixed $arr 2
+        (i32.const 0)
+        (i32.const 0)
+      )
+      (i32.const 0)
+      (i32.const 10)
+      (i32.const 20)
+    )
+  )
+
+  ;; CHECK:      (func $array-rmw-nonconstant-index (type $5) (param $idx i32) (result i32)
+  ;; CHECK-NEXT:  (array.atomic.rmw.add $arr
+  ;; CHECK-NEXT:   (array.new_fixed $arr 2
+  ;; CHECK-NEXT:    (i32.const 0)
+  ;; CHECK-NEXT:    (i32.const 0)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:   (local.get $idx)
+  ;; CHECK-NEXT:   (i32.const 1)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT: )
+  (func $array-rmw-nonconstant-index (param $idx i32) (result i32)
+    ;; A non-constant index prevents the optimization, since Array2Struct
+    ;; needs to know which struct field to access at compile time.
+    (array.atomic.rmw.add $arr
+      (array.new_fixed $arr 2
+        (i32.const 0)
+        (i32.const 0)
+      )
+      (local.get $idx)
+      (i32.const 1)
+    )
+  )
+
+  ;; CHECK:      (func $array-rmw-oob (type $1) (result i32)
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (block (result nullref)
+  ;; CHECK-NEXT:    (ref.null none)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (i32.const 1)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (unreachable)
+  ;; CHECK-NEXT: )
+  (func $array-rmw-oob (result i32)
+    ;; An out-of-bounds index on a zero-size array. The access will always
+    ;; trap, so we emit drops for operands and an unreachable.
+    (array.atomic.rmw.add $arr
+      (array.new_default $arr
+        (i32.const 0)
+      )
+      (i32.const 0)
+      (i32.const 1)
+    )
+  )
+
+  ;; CHECK:      (func $array-cmpxchg-oob (type $1) (result i32)
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (block (result nullref)
+  ;; CHECK-NEXT:    (ref.null none)
+  ;; CHECK-NEXT:   )
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (i32.const 10)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (drop
+  ;; CHECK-NEXT:   (i32.const 20)
+  ;; CHECK-NEXT:  )
+  ;; CHECK-NEXT:  (unreachable)
+  ;; CHECK-NEXT: )
+  (func $array-cmpxchg-oob (result i32)
+    ;; As above, but for cmpxchg with an out-of-bounds index.
+    (array.atomic.rmw.cmpxchg $arr
+      (array.new_default $arr
+        (i32.const 0)
+      )
+      (i32.const 0)
+      (i32.const 10)
+      (i32.const 20)
     )
   )
 )

@@ -374,6 +374,8 @@ void test_features() {
   printf("BinaryenFeatureRelaxedSIMD: %d\n", BinaryenFeatureRelaxedSIMD());
   printf("BinaryenFeatureExtendedConst: %d\n", BinaryenFeatureExtendedConst());
   printf("BinaryenFeatureStrings: %d\n", BinaryenFeatureStrings());
+  printf("BinaryenFeatureRelaxedAtomics: %d\n",
+         BinaryenFeatureRelaxedAtomics());
   printf("BinaryenFeatureAll: %d\n", BinaryenFeatureAll());
 }
 
@@ -450,6 +452,15 @@ void test_core() {
                            BinaryenTypeFloat64()};
   BinaryenType iIfF = BinaryenTypeCreate(iIfF_, 4);
 
+  TypeBuilderRef typeBuilder = TypeBuilderCreate(1);
+  TypeBuilderSetSignatureType(typeBuilder, 0, iIfF, BinaryenTypeInt32());
+  BinaryenHeapType kitchenSinkerType;
+  bool builtType =
+    TypeBuilderBuildAndDispose(typeBuilder, &kitchenSinkerType, NULL, NULL);
+  assert(builtType);
+  BinaryenType kitchenSinkerRefType =
+    BinaryenTypeFromHeapType(kitchenSinkerType, false);
+
   BinaryenExpressionRef temp1 = makeInt32(module, 1),
                         temp2 = makeInt32(module, 2),
                         temp3 = makeInt32(module, 3),
@@ -471,7 +482,7 @@ void test_core() {
   BinaryenExpressionRef funcrefExpr =
     BinaryenRefNull(module, BinaryenTypeNullFuncref());
   funcrefExpr =
-    BinaryenRefFunc(module, "kitchen()sinker", BinaryenTypeFuncref());
+    BinaryenRefFunc(module, "kitchen()sinker", kitchenSinkerRefType);
   BinaryenExpressionRef i31refExpr =
     BinaryenRefI31(module, makeInt32(module, 1));
 
@@ -509,25 +520,29 @@ void test_core() {
   BinaryenType v128 = BinaryenTypeVec128();
   BinaryenType i8Array;
   BinaryenType i16Array;
+  BinaryenType funcArray;
   BinaryenType i32Struct;
   {
-    TypeBuilderRef tb = TypeBuilderCreate(3);
+    TypeBuilderRef tb = TypeBuilderCreate(4);
     TypeBuilderSetArrayType(
       tb, 0, BinaryenTypeInt32(), BinaryenPackedTypeInt8(), true);
     TypeBuilderSetArrayType(
       tb, 1, BinaryenTypeInt32(), BinaryenPackedTypeInt16(), true);
+    TypeBuilderSetArrayType(
+      tb, 2, BinaryenTypeFuncref(), BinaryenPackedTypeNotPacked(), true);
     TypeBuilderSetStructType(
       tb,
-      2,
+      3,
       (BinaryenType[]){BinaryenTypeInt32()},
       (BinaryenPackedType[]){BinaryenPackedTypeNotPacked()},
       (bool[]){true},
       1);
-    BinaryenHeapType builtHeapTypes[3];
+    BinaryenHeapType builtHeapTypes[4];
     TypeBuilderBuildAndDispose(tb, (BinaryenHeapType*)&builtHeapTypes, 0, 0);
     i8Array = BinaryenTypeFromHeapType(builtHeapTypes[0], true);
     i16Array = BinaryenTypeFromHeapType(builtHeapTypes[1], true);
-    i32Struct = BinaryenTypeFromHeapType(builtHeapTypes[2], true);
+    funcArray = BinaryenTypeFromHeapType(builtHeapTypes[2], true);
+    i32Struct = BinaryenTypeFromHeapType(builtHeapTypes[3], true);
   }
 
   // Memory. Add it before creating any memory-using instructions.
@@ -1033,6 +1048,8 @@ void test_core() {
                                4,
                                iIfF,
                                BinaryenTypeInt32()),
+    BinaryenReturnCallRef(
+      module, funcrefExpr, callOperands4b, 4, BinaryenTypeNone()),
     // Reference types
     BinaryenRefIsNull(module, externrefExpr),
     BinaryenRefIsNull(module, funcrefExpr),
@@ -1040,7 +1057,7 @@ void test_core() {
       module,
       temp10,
       BinaryenRefNull(module, BinaryenTypeNullFuncref()),
-      BinaryenRefFunc(module, "kitchen()sinker", BinaryenTypeFuncref())),
+      BinaryenRefFunc(module, "kitchen()sinker", kitchenSinkerRefType)),
     // GC
     BinaryenRefEq(module,
                   BinaryenRefNull(module, BinaryenTypeNullref()),
@@ -1088,9 +1105,16 @@ void test_core() {
       4,
       0,
       temp6,
-      BinaryenAtomicLoad(module, 4, 0, BinaryenTypeInt32(), temp6, "0"),
+      BinaryenAtomicLoad(module,
+                         4,
+                         0,
+                         BinaryenTypeInt32(),
+                         temp6,
+                         "0",
+                         BinaryenMemoryOrderSeqCst()),
       BinaryenTypeInt32(),
-      "0"),
+      "0",
+      BinaryenMemoryOrderSeqCst()),
     BinaryenDrop(module,
                  BinaryenAtomicWait(
                    module, temp6, temp6, temp16, BinaryenTypeInt32(), "0")),
@@ -1161,12 +1185,30 @@ void test_core() {
                      makeInt32(module, 42)),
     BinaryenArrayLen(module,
                      BinaryenGlobalGet(module, "i8Array-global", i8Array)),
+    BinaryenArrayFill(module,
+                      BinaryenGlobalGet(module, "i8Array-global", i8Array),
+                      makeInt32(module, 0),
+                      makeInt32(module, 1),
+                      makeInt32(module, 2)),
     BinaryenArrayCopy(module,
                       BinaryenGlobalGet(module, "i8Array-global", i8Array),
                       makeInt32(module, 0),
                       BinaryenGlobalGet(module, "i8Array-global", i8Array),
                       makeInt32(module, 1),
                       makeInt32(module, 2)),
+    BinaryenArrayInitData(module,
+                          "0",
+                          BinaryenGlobalGet(module, "i8Array-global", i8Array),
+                          makeInt32(module, 0),
+                          makeInt32(module, 1),
+                          makeInt32(module, 2)),
+    BinaryenArrayInitElem(
+      module,
+      "0",
+      BinaryenGlobalGet(module, "funcArray-global", funcArray),
+      makeInt32(module, 0),
+      makeInt32(module, 1),
+      makeInt32(module, 2)),
     // Strings
     BinaryenStringNew(module,
                       BinaryenStringNewLossyUTF8Array(),
@@ -1295,6 +1337,15 @@ void test_core() {
       module, BinaryenTypeGetHeapType(i16Array), makeInt32(module, 0), 0));
   BinaryenAddGlobal(
     module,
+    "funcArray-global",
+    funcArray,
+    true,
+    BinaryenArrayNew(module,
+                     BinaryenTypeGetHeapType(funcArray),
+                     makeInt32(module, 0),
+                     BinaryenRefNull(module, BinaryenTypeNullFuncref())));
+  BinaryenAddGlobal(
+    module,
     "i32Struct-global",
     i32Struct,
     true,
@@ -1331,7 +1382,7 @@ void test_core() {
   BinaryenRemoveElementSegment(module, "p2");
 
   BinaryenExpressionRef funcrefExpr1 =
-    BinaryenRefFunc(module, "kitchen()sinker", BinaryenTypeFuncref());
+    BinaryenRefFunc(module, "kitchen()sinker", kitchenSinkerRefType);
 
   BinaryenExpressionPrint(BinaryenTableSet(
     module, "0", BinaryenConst(module, BinaryenLiteralInt32(0)), funcrefExpr1));
@@ -1367,6 +1418,7 @@ void test_core() {
                                                     0,
                                                     BinaryenNop(module));
   BinaryenSetStart(module, starter);
+  assert(BinaryenGetStart(module) == starter);
 
   BinaryenFeatures features = BinaryenFeatureAll();
   BinaryenModuleSetFeatures(module, features);
@@ -2223,8 +2275,7 @@ void test_callref_and_types() {
                     BinaryenRefFunc(module, "tiny", funcType),
                     NULL,
                     0,
-                    BinaryenTypeNone(),
-                    false);
+                    BinaryenTypeNone());
   BinaryenFunctionSetBody(tiny, callRef);
 
   bool didValidate = BinaryenModuleValidate(module);
@@ -2234,6 +2285,77 @@ void test_callref_and_types() {
   BinaryenModuleDispose(module);
 }
 
+void test_relaxed_atomics() {
+  BinaryenModuleRef module = BinaryenModuleCreate();
+  BinaryenModuleSetFeatures(module, BinaryenFeatureAll());
+
+  BinaryenSetMemory(
+    module, 1, 1, "memory", NULL, NULL, NULL, NULL, NULL, 0, false, false, "0");
+
+  BinaryenExpressionRef load = BinaryenLoad(
+    module, 4, 0, 0, 0, BinaryenTypeInt32(), makeInt32(module, 0), "0");
+  BinaryenLoadSetMemoryOrder(load, BinaryenMemoryOrderAcqRel());
+  printf("Load memory order: %d\n", BinaryenLoadGetMemoryOrder(load));
+
+  BinaryenExpressionRef store = BinaryenStore(module,
+                                              4,
+                                              0,
+                                              0,
+                                              makeInt32(module, 0),
+                                              makeInt32(module, 1),
+                                              BinaryenTypeInt32(),
+                                              "0");
+  BinaryenStoreSetMemoryOrder(store, BinaryenMemoryOrderAcqRel());
+  printf("Store memory order: %d\n", BinaryenStoreGetMemoryOrder(store));
+
+  BinaryenExpressionRef rmw = BinaryenAtomicRMW(module,
+                                                BinaryenAtomicRMWAdd(),
+                                                4,
+                                                0,
+                                                makeInt32(module, 0),
+                                                makeInt32(module, 1),
+                                                BinaryenTypeInt32(),
+                                                "0",
+                                                BinaryenMemoryOrderSeqCst());
+  BinaryenAtomicRMWSetMemoryOrder(rmw, BinaryenMemoryOrderAcqRel());
+  printf("RMW memory order: %d\n", BinaryenAtomicRMWGetMemoryOrder(rmw));
+
+  BinaryenExpressionRef cmpxchg =
+    BinaryenAtomicCmpxchg(module,
+                          4,
+                          0,
+                          makeInt32(module, 0),
+                          makeInt32(module, 0),
+                          makeInt32(module, 1),
+                          BinaryenTypeInt32(),
+                          "0",
+                          BinaryenMemoryOrderSeqCst());
+  BinaryenAtomicCmpxchgSetMemoryOrder(cmpxchg, BinaryenMemoryOrderAcqRel());
+  printf("Cmpxchg memory order: %d\n",
+         BinaryenAtomicCmpxchgGetMemoryOrder(cmpxchg));
+
+  BinaryenExpressionRef statements[] = {BinaryenDrop(module, load),
+                                        store,
+                                        BinaryenDrop(module, rmw),
+                                        BinaryenDrop(module, cmpxchg)};
+
+  BinaryenExpressionRef value =
+    BinaryenBlock(module,
+                  "body",
+                  statements,
+                  sizeof(statements) / sizeof(BinaryenExpressionRef),
+                  BinaryenTypeAuto());
+
+  BinaryenFunctionRef tiny = BinaryenAddFunction(module,
+                                                 "relaxed-atomics",
+                                                 BinaryenTypeNone(),
+                                                 BinaryenTypeNone(),
+                                                 NULL,
+                                                 0,
+                                                 value);
+  BinaryenModulePrint(module);
+  BinaryenModuleDispose(module);
+}
 int main() {
   test_types();
   test_features();
@@ -2248,6 +2370,7 @@ int main() {
   test_func_opt();
   test_typebuilder();
   test_callref_and_types();
+  test_relaxed_atomics();
 
   return 0;
 }

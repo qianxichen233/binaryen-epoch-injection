@@ -40,7 +40,6 @@
 #include "ir/names.h"
 #include "ir/table-utils.h"
 #include "ir/utils.h"
-#include "mixed_arena.h"
 #include "passes/passes.h"
 #include "support/base64.h"
 #include "support/file.h"
@@ -88,7 +87,8 @@ bool isTableExported(Module& wasm) {
     return false;
   }
   for (auto& ex : wasm.exports) {
-    if (ex->kind == ExternalKind::Table && ex->value == wasm.tables[0]->name) {
+    if (ex->kind == ExternalKind::Table &&
+        *ex->getInternalName() == wasm.tables[0]->name) {
       return true;
     }
   }
@@ -342,7 +342,7 @@ Ref Wasm2JSBuilder::processWasm(Module* wasm, Name funcName) {
   // Scan the wasm for important things.
   for (auto& exp : wasm->exports) {
     if (exp->kind == ExternalKind::Function) {
-      functionsCallableFromOutside.insert(exp->value);
+      functionsCallableFromOutside.insert(*exp->getInternalName());
     }
   }
   ElementUtils::iterAllElementFunctionNames(
@@ -534,11 +534,8 @@ Ref Wasm2JSBuilder::processWasm(Module* wasm, Name funcName) {
                         {},
                         builder.makeReturn(builder.makeGlobalGet(
                           INT64_TO_32_HIGH_BITS, Type::i32))))));
-    auto e = new Export();
-    e->name = WASM_FETCH_HIGH_BITS;
-    e->value = WASM_FETCH_HIGH_BITS;
-    e->kind = ExternalKind::Function;
-    wasm->addExport(e);
+    wasm->addExport(new Export(
+      WASM_FETCH_HIGH_BITS, ExternalKind::Function, WASM_FETCH_HIGH_BITS));
   }
   if (flags.emscripten) {
     asmFunc[3]->push_back(ValueBuilder::makeName("// EMSCRIPTEN_END_FUNCS\n"));
@@ -765,7 +762,8 @@ void Wasm2JSBuilder::addExports(Ref ast, Module* wasm) {
         ValueBuilder::appendToObjectWithQuotes(
           exports,
           fromName(export_->name, NameScope::Export),
-          ValueBuilder::makeName(fromName(export_->value, NameScope::Top)));
+          ValueBuilder::makeName(
+            fromName(*export_->getInternalName(), NameScope::Top)));
         break;
       }
       case ExternalKind::Memory: {
@@ -807,7 +805,8 @@ void Wasm2JSBuilder::addExports(Ref ast, Module* wasm) {
       case ExternalKind::Global: {
         Ref object = ValueBuilder::makeObject();
 
-        IString identName = fromName(export_->value, NameScope::Top);
+        IString identName =
+          fromName(*export_->getInternalName(), NameScope::Top);
 
         // getter
         {
@@ -1468,7 +1467,7 @@ Ref Wasm2JSBuilder::processExpression(Expression* curr,
           Fatal() << "Unhandled type in load: " << curr->type;
         }
       }
-      if (curr->isAtomic) {
+      if (curr->isAtomic()) {
         Ref call = ValueBuilder::makeCall(
           ValueBuilder::makeDot(ValueBuilder::makeName(ATOMICS), LOAD));
         ValueBuilder::appendToCall(call, ret[1]);
@@ -1562,7 +1561,7 @@ Ref Wasm2JSBuilder::processExpression(Expression* curr,
           Fatal() << "Unhandled type in store: " << curr->valueType;
         }
       }
-      if (curr->isAtomic) {
+      if (curr->isAtomic()) {
         Ref call = ValueBuilder::makeCall(
           ValueBuilder::makeDot(ValueBuilder::makeName(ATOMICS), STORE));
         ValueBuilder::appendToCall(call, ret[1]);
@@ -2141,6 +2140,11 @@ Ref Wasm2JSBuilder::processExpression(Expression* curr,
 
     // TODOs
 
+    Ref visitPause(Pause* curr) {
+      unimplemented(curr);
+      WASM_UNREACHABLE("unimp");
+    }
+
     Ref visitSIMDExtract(SIMDExtract* curr) {
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
@@ -2252,6 +2256,10 @@ Ref Wasm2JSBuilder::processExpression(Expression* curr,
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
     }
+    Ref visitElemDrop(ElemDrop* curr) {
+      unimplemented(curr);
+      WASM_UNREACHABLE("unimp");
+    }
     Ref visitTry(Try* curr) {
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
@@ -2304,6 +2312,10 @@ Ref Wasm2JSBuilder::processExpression(Expression* curr,
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
     }
+    Ref visitRefGetDesc(RefGetDesc* curr) {
+      unimplemented(curr);
+      WASM_UNREACHABLE("unimp");
+    }
     Ref visitBrOn(BrOn* curr) {
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
@@ -2325,6 +2337,14 @@ Ref Wasm2JSBuilder::processExpression(Expression* curr,
       WASM_UNREACHABLE("unimp");
     }
     Ref visitStructCmpxchg(StructCmpxchg* curr) {
+      unimplemented(curr);
+      WASM_UNREACHABLE("unimp");
+    }
+    Ref visitStructWait(StructWait* curr) {
+      unimplemented(curr);
+      WASM_UNREACHABLE("unimp");
+    }
+    Ref visitStructNotify(StructNotify* curr) {
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
     }
@@ -2372,6 +2392,14 @@ Ref Wasm2JSBuilder::processExpression(Expression* curr,
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
     }
+    Ref visitArrayRMW(ArrayRMW* curr) {
+      unimplemented(curr);
+      WASM_UNREACHABLE("unimp");
+    }
+    Ref visitArrayCmpxchg(ArrayCmpxchg* curr) {
+      unimplemented(curr);
+      WASM_UNREACHABLE("unimp");
+    }
     Ref visitStringNew(StringNew* curr) {
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
@@ -2396,6 +2424,10 @@ Ref Wasm2JSBuilder::processExpression(Expression* curr,
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
     }
+    Ref visitStringTest(StringTest* curr) {
+      unimplemented(curr);
+      WASM_UNREACHABLE("unimp");
+    }
     Ref visitStringWTF16Get(StringWTF16Get* curr) {
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
@@ -2416,11 +2448,15 @@ Ref Wasm2JSBuilder::processExpression(Expression* curr,
         ValueBuilder::makeCall(ABI::wasm2js::TRAP));
     }
 
+    Ref visitContNew(ContNew* curr) {
+      unimplemented(curr);
+      WASM_UNREACHABLE("unimp");
+    }
     Ref visitContBind(ContBind* curr) {
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
     }
-    Ref visitContNew(ContNew* curr) {
+    Ref visitSuspend(Suspend* curr) {
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
     }
@@ -2428,7 +2464,11 @@ Ref Wasm2JSBuilder::processExpression(Expression* curr,
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
     }
-    Ref visitSuspend(Suspend* curr) {
+    Ref visitResumeThrow(ResumeThrow* curr) {
+      unimplemented(curr);
+      WASM_UNREACHABLE("unimp");
+    }
+    Ref visitStackSwitch(StackSwitch* curr) {
       unimplemented(curr);
       WASM_UNREACHABLE("unimp");
     }
@@ -2499,17 +2539,25 @@ void Wasm2JSBuilder::addMemoryGrowFunc(Ref ast, Module* wasm) {
       JsType::JS_INT));
 
   Ref block = ValueBuilder::makeBlock();
-  memoryGrowFunc[3]->push_back(ValueBuilder::makeIf(
-    ValueBuilder::makeBinary(
-      ValueBuilder::makeBinary(ValueBuilder::makeName(IString("oldPages")),
-                               LT,
-                               ValueBuilder::makeName(IString("newPages"))),
+  Ref condition = ValueBuilder::makeBinary(
+    ValueBuilder::makeBinary(ValueBuilder::makeName(IString("oldPages")),
+                             LT,
+                             ValueBuilder::makeName(IString("newPages"))),
+    IString("&&"),
+    ValueBuilder::makeBinary(ValueBuilder::makeName(IString("newPages")),
+                             LT,
+                             ValueBuilder::makeInt(Memory::kMaxSize32)));
+  // Also enforce the module's declared memory maximum, if one exists.
+  if (!wasm->memories.empty() && wasm->memories[0]->hasMax()) {
+    condition = ValueBuilder::makeBinary(
+      condition,
       IString("&&"),
       ValueBuilder::makeBinary(ValueBuilder::makeName(IString("newPages")),
-                               LT,
-                               ValueBuilder::makeInt(Memory::kMaxSize32))),
-    block,
-    NULL));
+                               LE,
+                               ValueBuilder::makeInt(static_cast<uint32_t>(
+                                 wasm->memories[0]->max.addr))));
+  }
+  memoryGrowFunc[3]->push_back(ValueBuilder::makeIf(condition, block, NULL));
 
   Ref newBuffer = ValueBuilder::makeVar();
   ValueBuilder::appendToBlock(block, newBuffer);

@@ -14,7 +14,7 @@
  ;; PRIMARY:      (type $elem-array (array externref))
  (type $elem-array (array externref))
 
- ;; PRIMARY:      (import "placeholder" "0" (func $placeholder_0))
+ ;; PRIMARY:      (import "placeholder.deferred" "0" (func $placeholder_0))
 
  ;; PRIMARY:      (memory $mem 0)
  (memory $mem 0)
@@ -28,8 +28,6 @@
  (elem $elem externref)
 
  ;; PRIMARY:      (elem $1 (i32.const 0) $placeholder_0)
-
- ;; PRIMARY:      (export "memory" (memory $mem))
 
  ;; PRIMARY:      (export "table" (table $0))
 

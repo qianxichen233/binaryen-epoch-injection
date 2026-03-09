@@ -29,7 +29,7 @@ namespace wasm {
 struct NameType {
   Name name;
   Type type;
-  NameType() : name(nullptr), type(Type::none) {}
+  NameType() : type(Type::none) {}
   NameType(Name name, Type type) : name(name), type(type) {}
 };
 
@@ -44,10 +44,10 @@ public:
   // make* functions create an expression instance.
 
   static std::unique_ptr<Function> makeFunction(Name name,
-                                                HeapType type,
+                                                Type type,
                                                 std::vector<Type>&& vars,
                                                 Expression* body = nullptr) {
-    assert(type.isSignature());
+    assert(type.isSignature() && type.isNonNullable());
     auto func = std::make_unique<Function>();
     func->name = name;
     func->type = type;
@@ -57,8 +57,16 @@ public:
   }
 
   static std::unique_ptr<Function> makeFunction(Name name,
-                                                std::vector<NameType>&& params,
                                                 HeapType type,
+                                                std::vector<Type>&& vars,
+                                                Expression* body = nullptr) {
+    return makeFunction(
+      name, Type(type, NonNullable, Exact), std::move(vars), body);
+  }
+
+  static std::unique_ptr<Function> makeFunction(Name name,
+                                                std::vector<NameType>&& params,
+                                                Type type,
                                                 std::vector<NameType>&& vars,
                                                 Expression* body = nullptr) {
     assert(type.isSignature());
@@ -80,6 +88,18 @@ public:
       func->localNames[index] = var.name;
     }
     return func;
+  }
+
+  static std::unique_ptr<Function> makeFunction(Name name,
+                                                std::vector<NameType>&& params,
+                                                HeapType type,
+                                                std::vector<NameType>&& vars,
+                                                Expression* body = nullptr) {
+    return makeFunction(name,
+                        std::move(params),
+                        Type(type, NonNullable, Exact),
+                        std::move(vars),
+                        body);
   }
 
   static std::unique_ptr<Table> makeTable(Name name,
@@ -142,12 +162,8 @@ public:
   }
 
   static std::unique_ptr<Export>
-  makeExport(Name name, Name value, ExternalKind kind) {
-    auto export_ = std::make_unique<Export>();
-    export_->name = name;
-    export_->value = value;
-    export_->kind = kind;
-    return export_;
+  makeExport(Name name, std::variant<Name, HeapType> value, ExternalKind kind) {
+    return std::make_unique<Export>(name, kind, value);
   }
 
   enum Mutability { Mutable, Immutable };
@@ -357,7 +373,6 @@ public:
                  Type type,
                  Name memory) {
     auto* ret = wasm.allocator.alloc<Load>();
-    ret->isAtomic = false;
     ret->bytes = bytes;
     ret->signed_ = signed_;
     ret->offset = offset;
@@ -365,13 +380,21 @@ public:
     ret->ptr = ptr;
     ret->type = type;
     ret->memory = memory;
+    ret->order = MemoryOrder::Unordered;
     ret->finalize();
     return ret;
   }
-  Load* makeAtomicLoad(
-    unsigned bytes, Address offset, Expression* ptr, Type type, Name memory) {
+  Load* makeAtomicLoad(unsigned bytes,
+                       Address offset,
+                       Expression* ptr,
+                       Type type,
+                       Name memory,
+                       MemoryOrder order) {
+    assert(order != MemoryOrder::Unordered &&
+           "Atomic loads can't be unordered");
+
     Load* load = makeLoad(bytes, false, offset, bytes, ptr, type, memory);
-    load->isAtomic = true;
+    load->order = order;
     return load;
   }
   AtomicWait* makeAtomicWait(Expression* ptr,
@@ -403,6 +426,7 @@ public:
     return notify;
   }
   AtomicFence* makeAtomicFence() { return wasm.allocator.alloc<AtomicFence>(); }
+  Pause* makePause() { return wasm.allocator.alloc<Pause>(); }
   Store* makeStore(unsigned bytes,
                    Address offset,
                    unsigned align,
@@ -411,7 +435,6 @@ public:
                    Type type,
                    Name memory) {
     auto* ret = wasm.allocator.alloc<Store>();
-    ret->isAtomic = false;
     ret->bytes = bytes;
     ret->offset = offset;
     ret->align = align;
@@ -419,6 +442,7 @@ public:
     ret->value = value;
     ret->valueType = type;
     ret->memory = memory;
+    ret->order = MemoryOrder::Unordered;
     ret->finalize();
     return ret;
   }
@@ -427,9 +451,13 @@ public:
                          Expression* ptr,
                          Expression* value,
                          Type type,
-                         Name memory) {
+                         Name memory,
+                         MemoryOrder order) {
+    assert(order != MemoryOrder::Unordered &&
+           "Atomic stores can't be unordered");
+
     Store* store = makeStore(bytes, offset, bytes, ptr, value, type, memory);
-    store->isAtomic = true;
+    store->order = order;
     return store;
   }
   AtomicRMW* makeAtomicRMW(AtomicRMWOp op,
@@ -438,7 +466,8 @@ public:
                            Expression* ptr,
                            Expression* value,
                            Type type,
-                           Name memory) {
+                           Name memory,
+                           MemoryOrder order) {
     auto* ret = wasm.allocator.alloc<AtomicRMW>();
     ret->op = op;
     ret->bytes = bytes;
@@ -446,8 +475,9 @@ public:
     ret->ptr = ptr;
     ret->value = value;
     ret->type = type;
-    ret->finalize();
     ret->memory = memory;
+    ret->order = order;
+    ret->finalize();
     return ret;
   }
   AtomicCmpxchg* makeAtomicCmpxchg(unsigned bytes,
@@ -456,7 +486,8 @@ public:
                                    Expression* expected,
                                    Expression* replacement,
                                    Type type,
-                                   Name memory) {
+                                   Name memory,
+                                   MemoryOrder order) {
     auto* ret = wasm.allocator.alloc<AtomicCmpxchg>();
     ret->bytes = bytes;
     ret->offset = offset;
@@ -464,8 +495,9 @@ public:
     ret->expected = expected;
     ret->replacement = replacement;
     ret->type = type;
-    ret->finalize();
     ret->memory = memory;
+    ret->order = order;
+    ret->finalize();
     return ret;
   }
   SIMDExtract*
@@ -677,22 +709,25 @@ public:
     ret->finalize(Type(type.getBottom(), Nullable));
     return ret;
   }
-  RefNull* makeRefNull(Type type) {
-    assert(type.isNullable() && type.isNull());
-    auto* ret = wasm.allocator.alloc<RefNull>();
-    ret->finalize(type);
-    return ret;
-  }
   RefIsNull* makeRefIsNull(Expression* value) {
     auto* ret = wasm.allocator.alloc<RefIsNull>();
     ret->value = value;
     ret->finalize();
     return ret;
   }
-  RefFunc* makeRefFunc(Name func, HeapType heapType) {
+  RefFunc* makeRefFunc(Name func, Type type) {
     auto* ret = wasm.allocator.alloc<RefFunc>();
     ret->func = func;
-    ret->finalize(Type(heapType, NonNullable));
+    // Just apply the type, trusting it completely. This is safe to do even in
+    // the middle of an operation (where the Module is in the process of being
+    // altered, and should not be read from, which finalize normally does).
+    ret->type = type;
+    return ret;
+  }
+  RefFunc* makeRefFunc(Name func) {
+    auto* ret = wasm.allocator.alloc<RefFunc>();
+    ret->func = func;
+    ret->finalize(wasm);
     return ret;
   }
   RefEq* makeRefEq(Expression* left, Expression* right) {
@@ -778,6 +813,12 @@ public:
     ret->finalize();
     return ret;
   }
+  ElemDrop* makeElemDrop(Name segment) {
+    auto* ret = wasm.allocator.alloc<ElemDrop>();
+    ret->segment = segment;
+    ret->finalize();
+    return ret;
+  }
 
 private:
   Try* makeTry(Name name,
@@ -791,6 +832,7 @@ private:
     ret->body = body;
     ret->catchTags.set(catchTags);
     ret->catchBodies.set(catchBodies);
+    ret->delegateTarget = delegateTarget;
     ret->finalize(type);
     return ret;
   }
@@ -898,41 +940,66 @@ public:
     return ret;
   }
   RefCast* makeRefCast(Expression* ref, Type type) {
+    return makeRefCast(ref, nullptr, type);
+  }
+  RefCast* makeRefCast(Expression* ref, Expression* desc, Type type) {
     auto* ret = wasm.allocator.alloc<RefCast>();
     ret->ref = ref;
+    ret->desc = desc;
     ret->type = type;
     ret->finalize();
     return ret;
   }
-  BrOn*
-  makeBrOn(BrOnOp op, Name name, Expression* ref, Type castType = Type::none) {
+  RefGetDesc* makeRefGetDesc(Expression* ref) {
+    auto* ret = wasm.allocator.alloc<RefGetDesc>();
+    ret->ref = ref;
+    ret->finalize();
+    return ret;
+  }
+  BrOn* makeBrOn(BrOnOp op,
+                 Name name,
+                 Expression* ref,
+                 Type castType = Type::none,
+                 Expression* desc = nullptr) {
+    assert((desc && (op == BrOnCastDescEq || op == BrOnCastDescEqFail)) ||
+           (!desc && op != BrOnCastDescEq && op != BrOnCastDescEqFail));
     auto* ret = wasm.allocator.alloc<BrOn>();
     ret->op = op;
     ret->name = name;
     ret->ref = ref;
+    ret->desc = desc;
     ret->castType = castType;
     ret->finalize();
     return ret;
   }
   StructNew* makeStructNew(HeapType type,
-                           std::initializer_list<Expression*> args) {
+                           std::initializer_list<Expression*> args,
+                           Expression* descriptor = nullptr) {
     auto* ret = wasm.allocator.alloc<StructNew>();
     ret->operands.set(args);
-    ret->type = Type(type, NonNullable);
+    ret->desc = descriptor;
+    ret->type = Type(type, NonNullable, Exact);
     ret->finalize();
     return ret;
   }
-  StructNew* makeStructNew(HeapType type, ExpressionList&& args) {
+  StructNew* makeStructNew(HeapType type,
+                           ExpressionList&& args,
+                           Expression* descriptor = nullptr) {
     auto* ret = wasm.allocator.alloc<StructNew>();
     ret->operands = std::move(args);
-    ret->type = Type(type, NonNullable);
+    ret->desc = descriptor;
+    ret->type = Type(type, NonNullable, Exact);
     ret->finalize();
     return ret;
   }
-  template<typename T> StructNew* makeStructNew(HeapType type, const T& args) {
+  template<typename T>
+  StructNew* makeStructNew(HeapType type,
+                           const T& args,
+                           Expression* descriptor = nullptr) {
     auto* ret = wasm.allocator.alloc<StructNew>();
     ret->operands.set(args);
-    ret->type = Type(type, NonNullable);
+    ret->desc = descriptor;
+    ret->type = Type(type, NonNullable, Exact);
     ret->finalize();
     return ret;
   }
@@ -995,7 +1062,7 @@ public:
     auto* ret = wasm.allocator.alloc<ArrayNew>();
     ret->size = size;
     ret->init = init;
-    ret->type = Type(type, NonNullable);
+    ret->type = Type(type, NonNullable, Exact);
     ret->finalize();
     return ret;
   }
@@ -1007,7 +1074,7 @@ public:
     ret->segment = seg;
     ret->offset = offset;
     ret->size = size;
-    ret->type = Type(type, NonNullable);
+    ret->type = Type(type, NonNullable, Exact);
     ret->finalize();
     return ret;
   }
@@ -1019,7 +1086,7 @@ public:
     ret->segment = seg;
     ret->offset = offset;
     ret->size = size;
-    ret->type = Type(type, NonNullable);
+    ret->type = Type(type, NonNullable, Exact);
     ret->finalize();
     return ret;
   }
@@ -1027,7 +1094,7 @@ public:
   ArrayNewFixed* makeArrayNewFixed(HeapType type, const T& values) {
     auto* ret = wasm.allocator.alloc<ArrayNewFixed>();
     ret->values.set(values);
-    ret->type = Type(type, NonNullable);
+    ret->type = Type(type, NonNullable, Exact);
     ret->finalize();
     return ret;
   }
@@ -1038,6 +1105,7 @@ public:
   }
   ArrayGet* makeArrayGet(Expression* ref,
                          Expression* index,
+                         MemoryOrder order,
                          Type type,
                          bool signed_ = false) {
     auto* ret = wasm.allocator.alloc<ArrayGet>();
@@ -1045,15 +1113,19 @@ public:
     ret->index = index;
     ret->type = type;
     ret->signed_ = signed_;
+    ret->order = order;
     ret->finalize();
     return ret;
   }
-  ArraySet*
-  makeArraySet(Expression* ref, Expression* index, Expression* value) {
+  ArraySet* makeArraySet(Expression* ref,
+                         Expression* index,
+                         Expression* value,
+                         MemoryOrder order) {
     auto* ret = wasm.allocator.alloc<ArraySet>();
     ret->ref = ref;
     ret->index = index;
     ret->value = value;
+    ret->order = order;
     ret->finalize();
     return ret;
   }
@@ -1117,6 +1189,34 @@ public:
     ret->finalize();
     return ret;
   }
+  ArrayRMW* makeArrayRMW(AtomicRMWOp op,
+                         Expression* ref,
+                         Expression* index,
+                         Expression* value,
+                         MemoryOrder order) {
+    auto* ret = wasm.allocator.alloc<ArrayRMW>();
+    ret->op = op;
+    ret->ref = ref;
+    ret->index = index;
+    ret->value = value;
+    ret->order = order;
+    ret->finalize();
+    return ret;
+  }
+  ArrayCmpxchg* makeArrayCmpxchg(Expression* ref,
+                                 Expression* index,
+                                 Expression* expected,
+                                 Expression* replacement,
+                                 MemoryOrder order) {
+    auto* ret = wasm.allocator.alloc<ArrayCmpxchg>();
+    ret->ref = ref;
+    ret->index = index;
+    ret->expected = expected;
+    ret->replacement = replacement;
+    ret->order = order;
+    ret->finalize();
+    return ret;
+  }
   RefAs* makeRefAs(RefAsOp op, Expression* value) {
     auto* ret = wasm.allocator.alloc<RefAs>();
     ret->op = op;
@@ -1177,6 +1277,12 @@ public:
     ret->finalize();
     return ret;
   }
+  StringTest* makeStringTest(Expression* ref) {
+    auto* ret = wasm.allocator.alloc<StringTest>();
+    ret->ref = ref;
+    ret->finalize();
+    return ret;
+  }
   StringWTF16Get* makeStringWTF16Get(Expression* ref, Expression* pos) {
     auto* ret = wasm.allocator.alloc<StringWTF16Get>();
     ret->ref = ref;
@@ -1193,37 +1299,21 @@ public:
     ret->finalize();
     return ret;
   }
-  ContBind* makeContBind(HeapType contTypeBefore,
-                         HeapType contTypeAfter,
-                         const std::vector<Expression*>& operands,
-                         Expression* cont) {
-    auto* ret = wasm.allocator.alloc<ContBind>();
-    ret->contTypeBefore = contTypeBefore;
-    ret->contTypeAfter = contTypeAfter;
-    ret->operands.set(operands);
-    ret->cont = cont;
-    ret->finalize();
-    return ret;
-  }
-  ContNew* makeContNew(HeapType contType, Expression* func) {
+  ContNew* makeContNew(HeapType type, Expression* func) {
     auto* ret = wasm.allocator.alloc<ContNew>();
-    ret->contType = contType;
+    ret->type = Type(type, NonNullable, Exact);
     ret->func = func;
     ret->finalize();
     return ret;
   }
-  Resume* makeResume(HeapType contType,
-                     const std::vector<Name>& handlerTags,
-                     const std::vector<Name>& handlerBlocks,
-                     const std::vector<Expression*>& operands,
-                     Expression* cont) {
-    auto* ret = wasm.allocator.alloc<Resume>();
-    ret->contType = contType;
-    ret->handlerTags.set(handlerTags);
-    ret->handlerBlocks.set(handlerBlocks);
-    ret->operands.set(operands);
+  ContBind* makeContBind(HeapType targetType,
+                         ExpressionList&& operands,
+                         Expression* cont) {
+    auto* ret = wasm.allocator.alloc<ContBind>();
+    ret->type = Type(targetType, NonNullable, Exact);
+    ret->operands = std::move(operands);
     ret->cont = cont;
-    ret->finalize(&wasm);
+    ret->finalize();
     return ret;
   }
   Suspend* makeSuspend(Name tag, const std::vector<Expression*>& args) {
@@ -1231,6 +1321,68 @@ public:
     ret->tag = tag;
     ret->operands.set(args);
     ret->finalize(&wasm);
+    return ret;
+  }
+  Resume* makeResume(const std::vector<Name>& handlerTags,
+                     const std::vector<Name>& handlerBlocks,
+                     const std::vector<Type>& sentTypes,
+                     ExpressionList&& operands,
+                     Expression* cont) {
+    auto* ret = wasm.allocator.alloc<Resume>();
+    ret->handlerTags.set(handlerTags);
+    ret->handlerBlocks.set(handlerBlocks);
+    ret->sentTypes.set(sentTypes);
+    ret->operands = std::move(operands);
+    ret->cont = cont;
+    ret->finalize();
+    return ret;
+  }
+  ResumeThrow* makeResumeThrow(Name tag,
+                               const std::vector<Name>& handlerTags,
+                               const std::vector<Name>& handlerBlocks,
+                               const std::vector<Type>& sentTypes,
+                               ExpressionList&& operands,
+                               Expression* cont) {
+    auto* ret = wasm.allocator.alloc<ResumeThrow>();
+    ret->tag = tag;
+    ret->handlerTags.set(handlerTags);
+    ret->handlerBlocks.set(handlerBlocks);
+    ret->sentTypes.set(sentTypes);
+    ret->operands = std::move(operands);
+    ret->cont = cont;
+    ret->finalize();
+    return ret;
+  }
+  StackSwitch*
+  makeStackSwitch(Name tag, ExpressionList&& operands, Expression* cont) {
+    auto* ret = wasm.allocator.alloc<StackSwitch>();
+    ret->tag = tag;
+    ret->operands = std::move(operands);
+    ret->cont = cont;
+    ret->finalize();
+    return ret;
+  }
+
+  StructWait* makeStructWait(Index index,
+                             Expression* ref,
+                             Expression* expected,
+                             Expression* timeout) {
+    auto* ret = wasm.allocator.alloc<StructWait>();
+    ret->index = index;
+    ret->ref = ref;
+    ret->expected = expected;
+    ret->timeout = timeout;
+    ret->finalize();
+    return ret;
+  }
+
+  StructNotify*
+  makeStructNotify(Index index, Expression* ref, Expression* count) {
+    auto* ret = wasm.allocator.alloc<StructNotify>();
+    ret->index = index;
+    ret->ref = ref;
+    ret->count = count;
+    ret->finalize();
     return ret;
   }
 
@@ -1251,10 +1403,10 @@ public:
       return makeConst(value);
     }
     if (value.isNull()) {
-      return makeRefNull(type);
+      return makeRefNull(type.getHeapType());
     }
     if (type.isFunction()) {
-      return makeRefFunc(value.getFunc(), type.getHeapType());
+      return makeRefFunc(value.getFunc());
     }
     if (type.isRef() && type.getHeapType().isMaybeShared(HeapType::i31)) {
       return makeRefI31(makeConst(value.geti31()),
@@ -1304,7 +1456,7 @@ public:
     Signature sig = func->getSig();
     std::vector<Type> params(sig.params.begin(), sig.params.end());
     params.push_back(type);
-    func->type = Signature(Type(params), sig.results);
+    func->type = func->type.with(Signature(Type(params), sig.results));
     Index index = func->localNames.size();
     func->localIndices[name] = index;
     func->localNames[index] = name;
@@ -1398,11 +1550,6 @@ public:
     return makeDrop(curr);
   }
 
-  void flip(If* iff) {
-    std::swap(iff->ifTrue, iff->ifFalse);
-    iff->condition = makeUnary(EqZInt32, iff->condition);
-  }
-
   // Returns a replacement with the precise same type, and with minimal contents
   // as best we can. As a replacement, this may reuse the input node.
   template<typename T> Expression* replaceWithIdenticalType(T* curr) {
@@ -1416,8 +1563,8 @@ public:
       return maybeWrap(makeConstantExpression(Literal::makeZeros(curr->type)));
     }
     if (curr->type.isNullable()) {
-      return maybeWrap(ExpressionManipulator::refNull(
-        curr, Type(curr->type.getHeapType().getBottom(), Nullable)));
+      return maybeWrap(
+        ExpressionManipulator::refNull(curr, curr->type.getHeapType()));
     }
     if (curr->type.isRef() &&
         curr->type.getHeapType().isMaybeShared(HeapType::i31)) {

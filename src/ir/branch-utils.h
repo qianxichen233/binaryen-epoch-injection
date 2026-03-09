@@ -21,6 +21,10 @@
 #include "wasm-traversal.h"
 #include "wasm.h"
 
+#ifndef BRANCH_UTILS_DEBUG
+#define BRANCH_UTILS_DEBUG 0
+#endif
+
 namespace wasm::BranchUtils {
 
 // Some branches are obviously not actually reachable (e.g. (br $out
@@ -83,9 +87,16 @@ void operateOnScopeNameUsesAndSentTypes(Expression* expr, T func) {
         }
       }
     } else if (auto* r = expr->dynCast<Resume>()) {
-      for (Index i = 0; i < r->handlerTags.size(); i++) {
-        auto dest = r->handlerTags[i];
-        if (dest == name) {
+      for (Index i = 0; i < r->handlerBlocks.size(); i++) {
+        auto dest = r->handlerBlocks[i];
+        if (!dest.isNull() && dest == name) {
+          func(name, r->sentTypes[i]);
+        }
+      }
+    } else if (auto* r = expr->dynCast<ResumeThrow>()) {
+      for (Index i = 0; i < r->handlerBlocks.size(); i++) {
+        auto dest = r->handlerBlocks[i];
+        if (!dest.isNull() && dest == name) {
           func(name, r->sentTypes[i]);
         }
       }
@@ -117,6 +128,8 @@ void operateOnScopeNameUsesAndSentValues(Expression* expr, T func) {
     } else if (expr->is<Resume>()) {
       // The values are supplied by suspend instructions executed while running
       // the continuation, so we are unable to know what they will be here.
+      func(name, nullptr);
+    } else if (expr->is<ResumeThrow>()) {
       func(name, nullptr);
     } else {
       assert(expr->is<Try>() || expr->is<Rethrow>()); // delegate or rethrow
@@ -406,7 +419,7 @@ public:
 
   bool hasBranch(Expression* curr, Name target) {
     bool result = getBranches(curr).count(target);
-#ifdef BRANCH_UTILS_DEBUG
+#if BRANCH_UTILS_DEBUG
     assert(bresult == BranchSeeker::has(curr, target));
 #endif
     return result;

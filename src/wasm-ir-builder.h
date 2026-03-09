@@ -55,9 +55,21 @@ public:
   // initialized to initialize the child fields and refinalize it.
   Result<> visit(Expression*);
 
+  // The origin of an expression.
+  enum class Origin {
+    // The expression originates in the binary we are reading. We track binary
+    // locations for such instructions where necessary (for code annotations,
+    // etc.).
+    Binary = 0,
+    // The expression was synthetically added by the IRBuilder (e.g. a local.get
+    // of a scratch local).
+    Synthetic = 1
+  };
+
   // Like visit, but pushes the expression onto the stack as-is without popping
   // any children or refinalization.
-  void push(Expression*);
+  void push(Expression*, Origin origin = Origin::Binary);
+  void pushSynthetic(Expression* expr) { push(expr, Origin::Synthetic); }
 
   // Set the debug location to be attached to the next visited, created, or
   // pushed instruction.
@@ -72,8 +84,7 @@ public:
     this->codeSectionOffset = codeSectionOffset;
   }
 
-  // Set the function used to add scratch locals when constructing an isolated
-  // sequence of IR.
+  // The current function, used to create scratch locals, add annotations, etc.
   void setFunction(Function* func) { this->func = func; }
 
   // Handle the boundaries of control flow structures. Users may choose to use
@@ -117,13 +128,20 @@ public:
   // signatures ensure that there are no missing fields.
   Result<> makeNop();
   Result<> makeBlock(Name label, Signature sig);
-  Result<> makeIf(Name label, Signature sig);
+  Result<>
+  makeIf(Name label, Signature sig, const CodeAnnotation& annotations = {});
   Result<> makeLoop(Name label, Signature sig);
-  Result<> makeBreak(Index label, bool isConditional);
+  Result<> makeBreak(Index label,
+                     bool isConditional,
+                     const CodeAnnotation& annotations = {});
   Result<> makeSwitch(const std::vector<Index>& labels, Index defaultLabel);
   // Unlike Builder::makeCall, this assumes the function already exists.
-  Result<> makeCall(Name func, bool isReturn);
-  Result<> makeCallIndirect(Name table, HeapType type, bool isReturn);
+  Result<>
+  makeCall(Name func, bool isReturn, const CodeAnnotation& annotations = {});
+  Result<> makeCallIndirect(Name table,
+                            HeapType type,
+                            bool isReturn,
+                            const CodeAnnotation& annotations = {});
   Result<> makeLocalGet(Index local);
   Result<> makeLocalSet(Index local);
   Result<> makeLocalTee(Index local);
@@ -137,15 +155,22 @@ public:
                     Name mem);
   Result<> makeStore(
     unsigned bytes, Address offset, unsigned align, Type type, Name mem);
-  Result<> makeAtomicLoad(unsigned bytes, Address offset, Type type, Name mem);
-  Result<> makeAtomicStore(unsigned bytes, Address offset, Type type, Name mem);
-  Result<> makeAtomicRMW(
-    AtomicRMWOp op, unsigned bytes, Address offset, Type type, Name mem);
-  Result<>
-  makeAtomicCmpxchg(unsigned bytes, Address offset, Type type, Name mem);
+  Result<> makeAtomicLoad(
+    unsigned bytes, Address offset, Type type, Name mem, MemoryOrder order);
+  Result<> makeAtomicStore(
+    unsigned bytes, Address offset, Type type, Name mem, MemoryOrder order);
+  Result<> makeAtomicRMW(AtomicRMWOp op,
+                         unsigned bytes,
+                         Address offset,
+                         Type type,
+                         Name mem,
+                         MemoryOrder order);
+  Result<> makeAtomicCmpxchg(
+    unsigned bytes, Address offset, Type type, Name mem, MemoryOrder order);
   Result<> makeAtomicWait(Type type, Address offset, Name mem);
   Result<> makeAtomicNotify(Address offset, Name mem);
   Result<> makeAtomicFence();
+  Result<> makePause();
   Result<> makeSIMDExtract(SIMDExtractOp op, uint8_t lane);
   Result<> makeSIMDReplace(SIMDReplaceOp op, uint8_t lane);
   Result<> makeSIMDShuffle(const std::array<uint8_t, 16>& lanes);
@@ -183,6 +208,7 @@ public:
   Result<> makeTableFill(Name table);
   Result<> makeTableCopy(Name destTable, Name srcTable);
   Result<> makeTableInit(Name elem, Name table);
+  Result<> makeElemDrop(Name elem);
   Result<> makeTry(Name label, Signature sig);
   Result<> makeTryTable(Name label,
                         Signature sig,
@@ -197,31 +223,41 @@ public:
   Result<> makeTupleDrop(uint32_t arity);
   Result<> makeRefI31(Shareability share);
   Result<> makeI31Get(bool signed_);
-  Result<> makeCallRef(HeapType type, bool isReturn);
+  Result<> makeCallRef(HeapType type,
+                       bool isReturn,
+                       const CodeAnnotation& annotations = {});
   Result<> makeRefTest(Type type);
-  Result<> makeRefCast(Type type);
-  Result<>
-  makeBrOn(Index label, BrOnOp op, Type in = Type::none, Type out = Type::none);
-  Result<> makeStructNew(HeapType type);
-  Result<> makeStructNewDefault(HeapType type);
+  Result<> makeRefCast(Type type, bool isDesc);
+  Result<> makeRefGetDesc(HeapType type);
+  Result<> makeBrOn(Index label,
+                    BrOnOp op,
+                    Type in = Type::none,
+                    Type out = Type::none,
+                    const CodeAnnotation& annotations = {});
+  Result<> makeStructNew(HeapType type, bool isDesc);
+  Result<> makeStructNewDefault(HeapType type, bool isDesc);
   Result<>
   makeStructGet(HeapType type, Index field, bool signed_, MemoryOrder order);
   Result<> makeStructSet(HeapType type, Index field, MemoryOrder order);
   Result<>
   makeStructRMW(AtomicRMWOp op, HeapType type, Index field, MemoryOrder order);
   Result<> makeStructCmpxchg(HeapType type, Index field, MemoryOrder order);
+  Result<> makeStructWait(HeapType type, Index index);
+  Result<> makeStructNotify(HeapType type, Index index);
   Result<> makeArrayNew(HeapType type);
   Result<> makeArrayNewDefault(HeapType type);
   Result<> makeArrayNewData(HeapType type, Name data);
   Result<> makeArrayNewElem(HeapType type, Name elem);
   Result<> makeArrayNewFixed(HeapType type, uint32_t arity);
-  Result<> makeArrayGet(HeapType type, bool signed_);
-  Result<> makeArraySet(HeapType type);
+  Result<> makeArrayGet(HeapType type, bool signed_, MemoryOrder order);
+  Result<> makeArraySet(HeapType type, MemoryOrder order);
   Result<> makeArrayLen();
   Result<> makeArrayCopy(HeapType destType, HeapType srcType);
   Result<> makeArrayFill(HeapType type);
   Result<> makeArrayInitData(HeapType type, Name data);
   Result<> makeArrayInitElem(HeapType type, Name elem);
+  Result<> makeArrayRMW(AtomicRMWOp op, HeapType type, MemoryOrder order);
+  Result<> makeArrayCmpxchg(HeapType type, MemoryOrder order);
   Result<> makeRefAs(RefAsOp op);
   Result<> makeStringNew(StringNewOp op);
   Result<> makeStringConst(Name string);
@@ -229,16 +265,28 @@ public:
   Result<> makeStringEncode(StringEncodeOp op);
   Result<> makeStringConcat();
   Result<> makeStringEq(StringEqOp op);
+  Result<> makeStringTest();
   Result<> makeStringWTF8Advance();
   Result<> makeStringWTF16Get();
   Result<> makeStringIterNext();
   Result<> makeStringSliceWTF();
-  Result<> makeContBind(HeapType contTypeBefore, HeapType contTypeAfter);
   Result<> makeContNew(HeapType ct);
+  Result<> makeContBind(HeapType sourceType, HeapType targetType);
+  Result<> makeSuspend(Name tag);
   Result<> makeResume(HeapType ct,
                       const std::vector<Name>& tags,
-                      const std::vector<Index>& labels);
-  Result<> makeSuspend(Name tag);
+                      const std::vector<std::optional<Index>>& labels);
+  Result<> makeResumeThrow(HeapType ct,
+                           Name tag,
+                           const std::vector<Name>& tags,
+                           const std::vector<std::optional<Index>>& labels);
+  Result<> makeResumeThrowRef(HeapType ct,
+                              const std::vector<Name>& tags,
+                              const std::vector<std::optional<Index>>& labels) {
+    // resume_throw_ref has an empty tag.
+    return makeResumeThrow(ct, Name(), tags, labels);
+  }
+  Result<> makeStackSwitch(HeapType ct, Name tag);
 
   // Private functions that must be public for technical reasons.
   Result<> visitExpression(Expression*);
@@ -301,14 +349,17 @@ private:
     struct TryScope {
       Try* tryy;
       Name originalLabel;
+      Index index;
     };
     struct CatchScope {
       Try* tryy;
       Name originalLabel;
+      Index index;
     };
     struct CatchAllScope {
       Try* tryy;
       Name originalLabel;
+      Index index;
     };
     struct TryTableScope {
       TryTable* trytable;
@@ -391,15 +442,17 @@ private:
       return ScopeCtx(LoopScope{loop}, inputType);
     }
     static ScopeCtx makeTry(Try* tryy, Name originalLabel, Type inputType) {
-      return ScopeCtx(TryScope{tryy, originalLabel}, inputType);
+      return ScopeCtx(TryScope{tryy, originalLabel, 0}, inputType);
     }
     static ScopeCtx makeCatch(ScopeCtx&& scope, Try* tryy) {
-      scope.scope = CatchScope{tryy, scope.getOriginalLabel()};
+      scope.scope =
+        CatchScope{tryy, scope.getOriginalLabel(), scope.getIndex() + 1};
       scope.resetForDelimiter(/*keepInput=*/false);
       return scope;
     }
     static ScopeCtx makeCatchAll(ScopeCtx&& scope, Try* tryy) {
-      scope.scope = CatchAllScope{tryy, scope.getOriginalLabel()};
+      scope.scope =
+        CatchAllScope{tryy, scope.getOriginalLabel(), scope.getIndex() + 1};
       scope.resetForDelimiter(/*keepInput=*/false);
       return scope;
     }
@@ -497,7 +550,7 @@ private:
     }
     Type getResultType() {
       if (auto* func = getFunction()) {
-        return func->type.getSignature().results;
+        return func->getResults();
       }
       if (auto* block = getBlock()) {
         return block->type;
@@ -522,6 +575,18 @@ private:
       }
       if (auto* trytable = getTryTable()) {
         return trytable->type;
+      }
+      WASM_UNREACHABLE("unexpected scope kind");
+    }
+    Index getIndex() {
+      if (auto* tryScope = std::get_if<TryScope>(&scope)) {
+        return tryScope->index;
+      }
+      if (auto* catchScope = std::get_if<CatchScope>(&scope)) {
+        return catchScope->index;
+      }
+      if (auto* catchAllScope = std::get_if<CatchAllScope>(&scope)) {
+        return catchAllScope->index;
       }
       WASM_UNREACHABLE("unexpected scope kind");
     }
@@ -670,6 +735,8 @@ private:
                                                              size_t extraArity);
   Expression* fixExtraOutput(ScopeCtx& scope, Name label, Expression* expr);
   void fixLoopWithInput(Loop* loop, Type inputType, Index scratch);
+
+  void applyAnnotations(Expression* expr, const CodeAnnotation& annotation);
 
   void dump();
 };

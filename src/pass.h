@@ -19,7 +19,7 @@
 
 #include <functional>
 
-#include "mixed_arena.h"
+#include "support/mixed_arena.h"
 #include "support/utilities.h"
 #include "wasm-traversal.h"
 #include "wasm.h"
@@ -89,6 +89,17 @@ struct InliningOptions {
   // This is checked after alwaysInlineMaxSize and oneCallerInlineMaxSize, but
   // the order normally won't matter.
   Index flexibleInlineMaxSize = 20;
+  // The limit for the combined size of the code after inlining.
+  // We have an absolute limit in order to avoid extremely-large sizes after
+  // inlining, as they may hit limits in VMs and/or slow down startup
+  // (measurements there indicate something like ~1 second to optimize a 100K
+  // function). See e.g.
+  // https://github.com/WebAssembly/binaryen/pull/3730#issuecomment-867939138
+  // https://github.com/emscripten-core/emscripten/issues/13899#issuecomment-825073344
+  // The limit is arbitrary, but based on the links above. It is a very high
+  // value that should appear very rarely in practice (for example, it does
+  // not occur on the Emscripten benchmark suite of real-world codebases).
+  Index maxCombinedBinarySize = 400 * 1024;
   // Loops usually mean the function does heavy work, so the call overhead
   // is not significant and we do not inline such functions by default.
   bool allowFunctionsWithLoops = false;
@@ -98,11 +109,6 @@ struct InliningOptions {
   //       code, but reports of regressions have arrived.
   Index partialInliningIfs = 0;
 };
-
-// Forward declaration for FuncEffectsMap.
-class EffectAnalyzer;
-
-using FuncEffectsMap = std::unordered_map<Name, EffectAnalyzer>;
 
 struct PassOptions {
   friend Pass;
@@ -236,15 +242,6 @@ struct PassOptions {
   std::unordered_map<std::string, std::string> arguments;
   // Passes to skip and not run.
   std::unordered_set<std::string> passesToSkip;
-
-  // Effect info computed for functions. One pass can generate this and then
-  // other passes later can benefit from it. It is up to the sequence of passes
-  // to update or discard this when necessary - in particular, when new effects
-  // are added to a function this must be changed or we may optimize
-  // incorrectly. However, it is extremely rare for a pass to *add* effects;
-  // passes normally only remove effects. Passes that do add effects must set
-  // addsEffects() so the pass runner is aware of them.
-  std::shared_ptr<FuncEffectsMap> funcEffectsMap;
 
   // -Os is our default
   static constexpr const int DEFAULT_OPTIMIZE_LEVEL = 2;

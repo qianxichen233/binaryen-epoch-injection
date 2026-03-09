@@ -33,7 +33,7 @@
   ;; CHECK:      (global $global-other i32 (i32.const 123456))
   (global $global-other i32 (i32.const 123456))
 
-  ;; CHECK:      (func $test (type $1) (param $struct (ref null $struct))
+  ;; CHECK:      (func $test (type $1) (; (ref (exact $func.0)) ;) (param $struct (ref null $struct))
   ;; CHECK-NEXT:  ;;@ drop.c:10:1
   ;; CHECK-NEXT:  (drop
   ;; CHECK-NEXT:   ;;@ struct.c:20:2
@@ -47,10 +47,10 @@
   ;; CHECK-NEXT:     ;;@
   ;; CHECK-NEXT:     (ref.as_non_null
   ;; CHECK-NEXT:      ;;@ local.c:30:3
-  ;; CHECK-NEXT:      (local.get $struct) (; struct null ;)
-  ;; CHECK-NEXT:     ) (; struct ;)
+  ;; CHECK-NEXT:      (local.get $struct) (; (ref null $struct) ;)
+  ;; CHECK-NEXT:     ) (; (ref $struct) ;)
   ;; CHECK-NEXT:     ;;@
-  ;; CHECK-NEXT:     (global.get $global1) (; struct ;)
+  ;; CHECK-NEXT:     (global.get $global1) (; (ref $struct) ;)
   ;; CHECK-NEXT:    ) (; i32 ;)
   ;; CHECK-NEXT:   ) (; i32 ;)
   ;; CHECK-NEXT:  ) (; none ;)
