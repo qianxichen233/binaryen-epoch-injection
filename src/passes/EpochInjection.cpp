@@ -37,6 +37,7 @@
 namespace wasm {
 
 Name EPOCH_CALLBACK("epoch_callback");
+Name SIGNAL_CALLBACK("signal_callback");
 Name EPOCH("epoch");
 
 Name LIND_NAMESPACE("lind");
@@ -45,6 +46,7 @@ struct EpochInjection : public WalkerPass<PostWalker<EpochInjection>> {
   // The module name the epoch function is imported from.
   IString epochModule;
   bool importedEpoch;
+  bool isMainModule;
 
   // Adds calls to new imports.
   bool addsEffects() override { return true; }
@@ -52,6 +54,7 @@ struct EpochInjection : public WalkerPass<PostWalker<EpochInjection>> {
   void run(Module* module) override {
     epochModule = getArgumentOrDefault("epoch_callback", "");
     importedEpoch = hasArgument("epoch-import");
+    isMainModule = hasArgument("epoch-main-module");
     Super::run(module);
   }
 
@@ -84,6 +87,16 @@ struct EpochInjection : public WalkerPass<PostWalker<EpochInjection>> {
     if (importedEpoch) {
       epoch->module = LIND_NAMESPACE;
       epoch->base = EPOCH;
+    }
+
+    if (isMainModule) {
+      auto signal_callback =
+        Builder::makeFunction(
+          SIGNAL_CALLBACK, Type(Signature(Type({Type::i32, Type::i32}), Type::none), NonNullable, Inexact), {});
+      signal_callback->module = ENV;
+      signal_callback->base = SIGNAL_CALLBACK;
+      curr->addFunction(std::move(signal_callback));
+      curr->addExport(builder.makeExport(SIGNAL_CALLBACK, SIGNAL_CALLBACK, ExternalKind::Function));
     }
 
     import->module = LIND_NAMESPACE;
