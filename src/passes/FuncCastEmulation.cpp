@@ -157,12 +157,23 @@ struct FuncCastEmulation : public Pass {
   bool addsEffects() override { return true; }
 
   void run(Module* module) override {
-    Index numParams = std::stoul(getArgumentOrDefault("max-func-params", "16"));
+    bool need_relocate = hasArgument("relocatable-fpcast");
+
+    Index numParams = std::stoul(getArgumentOrDefault("max-func-params", "18"));
     // we just need the one ABI function type for all indirect calls
     HeapType ABIType(
       Signature(Type(std::vector<Type>(numParams, Type::i64)), Type::i64));
     // Add a thunk for each function in the table, and do the call through it.
     std::unordered_map<Name, Function*> funcThunks;
+
+    auto getOrCreateThunk = [&](Name name) -> Function* {
+      auto [iter, inserted] = funcThunks.insert({name, nullptr});
+      if (inserted) {
+        iter->second = makeThunk(name, module, numParams);
+      }
+      return iter->second;
+    };
+
     for (auto& segment : module->elementSegments) {
       if (!segment->type.isFunction()) {
         continue;
@@ -172,13 +183,50 @@ struct FuncCastEmulation : public Pass {
         if (!ref) {
           continue;
         }
-        auto [iter, inserted] = funcThunks.insert({ref->func, nullptr});
-        if (inserted) {
-          iter->second = makeThunk(ref->func, module, numParams);
-        }
-        auto* thunk = iter->second;
+        
+        auto* thunk = getOrCreateThunk(ref->func);
         ref->func = thunk->name;
         ref->finalize(*module);
+      }
+    }
+
+    if (need_relocate) {
+      struct PendingExport {
+        Name externalName;
+        Name internalName;
+      };
+      std::vector<PendingExport> newExports;
+
+      // add thunk for each function in export section
+      for (auto& exp : module->exports) {
+        if (exp->kind != ExternalKind::Function) {
+          continue;
+        }
+        
+        Name* internal = exp->getInternalName();
+        if(!internal) {
+          continue;
+        }
+
+        auto* thunk = getOrCreateThunk(*internal);
+
+        Name thunkExportName = "$fpcast_emu$" + std::string(exp->name.str);
+        
+        // Avoid duplicate exports if one already exists.
+        if (!module->getExportOrNull(thunkExportName)) {
+          newExports.push_back(PendingExport {thunkExportName, thunk->name});
+        }
+      }
+
+      // append the new thunk function into export section
+      for (auto& info : newExports) {
+        auto exportPtr = std::make_unique<Export>(
+          info.externalName,
+          ExternalKind::Function,
+          info.internalName
+        );
+        
+        module->addExport(std::move(exportPtr));
       }
     }
 
