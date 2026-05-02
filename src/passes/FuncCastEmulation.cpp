@@ -28,6 +28,7 @@
 // params must be identical, i.e., the "ABI" must match.
 //
 
+#include <iostream>
 #include <string>
 
 #include <ir/element-utils.h>
@@ -185,6 +186,9 @@ struct FuncCastEmulation : public Pass {
         }
         
         auto* thunk = getOrCreateThunk(ref->func);
+        if (!thunk) {
+          continue;
+        }
         ref->func = thunk->name;
         ref->finalize(*module);
       }
@@ -209,6 +213,9 @@ struct FuncCastEmulation : public Pass {
         }
 
         auto* thunk = getOrCreateThunk(*internal);
+        if (!thunk) {
+          continue;
+        }
 
         Name thunkExportName = "$fpcast_emu$" + std::string(exp->name.str);
         
@@ -236,6 +243,8 @@ struct FuncCastEmulation : public Pass {
 
 private:
   // Creates a thunk for a function, casting args and return value as needed.
+  // Returns nullptr if the function has more params than numParams (cannot
+  // build a valid thunk without referencing non-existent local indices).
   Function* makeThunk(Name name, Module* module, Index numParams) {
     Name thunk = std::string("byn$fpcast-emu$") + name.toString();
     if (module->getFunctionOrNull(thunk)) {
@@ -244,6 +253,16 @@ private:
     }
     // The item in the table may be a function or a function import.
     auto* func = module->getFunction(name);
+    // A thunk has exactly numParams i64 locals. If the original function has
+    // more parameters, local indices in the thunk body would exceed the
+    // function's local count, producing invalid IR and heap corruption in
+    // downstream passes. Skip thunk creation for such functions.
+    if (func->getParams().size() > numParams) {
+      std::cerr << "warning: FuncCastEmulation: skipping thunk for '"
+                << name.toString() << "' (" << func->getParams().size()
+                << " params exceeds max-func-params=" << numParams << ")\n";
+      return nullptr;
+    }
     Type type = func->getResults();
     Builder builder(*module);
     std::vector<Expression*> callOperands;
