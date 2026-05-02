@@ -29,11 +29,14 @@
 //
 
 #include <iostream>
+#include <set>
 #include <string>
+#include <vector>
 
 #include <ir/element-utils.h>
 #include <ir/literal-utils.h>
 #include <pass.h>
+#include <support/string.h>
 #include <wasm-builder.h>
 #include <wasm.h>
 
@@ -161,6 +164,40 @@ struct FuncCastEmulation : public Pass {
     bool need_relocate = hasArgument("relocatable-fpcast");
 
     Index numParams = std::stoul(getArgumentOrDefault("max-func-params", "18"));
+
+    // Optional whitelist: only functions whose names match are thunked.
+    // Accepts comma-separated names and '*'-glob patterns.
+    // Example: --pass-arg=fpcast-whitelist@foo,bar,baz_*
+    std::string whitelistInput = getArgumentOrDefault("fpcast-whitelist", "");
+    bool hasWhitelist = !whitelistInput.empty();
+    std::set<std::string> whitelistNames;
+    std::vector<std::string> whitelistPatterns;
+    if (hasWhitelist) {
+      String::Split list(whitelistInput, String::Split::NewLineOr(","));
+      for (auto& entry : list) {
+        if (entry.find('*') != std::string::npos) {
+          whitelistPatterns.push_back(entry);
+        } else {
+          whitelistNames.insert(entry);
+        }
+      }
+    }
+
+    auto inWhitelist = [&](Name name) -> bool {
+      if (!hasWhitelist) {
+        return true;
+      }
+      if (whitelistNames.count(name.toString())) {
+        return true;
+      }
+      for (auto& pattern : whitelistPatterns) {
+        if (String::wildcardMatch(pattern, name.toString())) {
+          return true;
+        }
+      }
+      return false;
+    };
+
     // we just need the one ABI function type for all indirect calls
     HeapType ABIType(
       Signature(Type(std::vector<Type>(numParams, Type::i64)), Type::i64));
@@ -168,6 +205,9 @@ struct FuncCastEmulation : public Pass {
     std::unordered_map<Name, Function*> funcThunks;
 
     auto getOrCreateThunk = [&](Name name) -> Function* {
+      if (!inWhitelist(name)) {
+        return nullptr;
+      }
       auto [iter, inserted] = funcThunks.insert({name, nullptr});
       if (inserted) {
         iter->second = makeThunk(name, module, numParams);
